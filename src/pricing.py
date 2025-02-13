@@ -1,12 +1,17 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
+import numba as nb
 
 
 # Pricing Models
 
+@nb.njit
 def black_scholes_price(S, K, mu, sigma, T, is_call = True):
 
+    if T <= 0:
+        return np.maximum(0, S - K)  # Handle expiration case
+    
     d1 = ( np.log(S / K) + (mu + 0.5 * sigma ** 2) * T ) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
 
@@ -37,6 +42,8 @@ def bsm_until_maturity(dataframe, K, mu, sigma, T, is_call=True):
     return df
 
 def bs_delta(S, K, T, r, sigma, is_call = True):
+    if T <= 0:
+        return 1.0 if S > K else 0.0 # Handle expiration case
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     delta = norm.cdf(d1) - (not is_call) # Formula for put is N(d1) - 1
     return delta

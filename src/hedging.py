@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
+import numba as nb
 
 # Set pandas display option to show two decimal places
-pd.options.display.float_format = '{:,.2f}'.format
+pd.options.display.float_format = '{:,.4f}'.format
 
 def adjustments(delta_diff):
     """
