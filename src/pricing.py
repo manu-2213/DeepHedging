@@ -1,26 +1,34 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-import numba as nb
 
 
 # Pricing Models
 
-@nb.njit
-def black_scholes_price(S, K, mu, sigma, T, is_call = True):
 
+
+def black_scholes_price(S, K, T, r, sigma, is_call=True):
     if T <= 0:
-        return np.maximum(0, S - K)  # Handle expiration case
+        return max(0.0, S - K) if is_call else max(0.0, K - S)
     
-    d1 = ( np.log(S / K) + (mu + 0.5 * sigma ** 2) * T ) / (sigma * np.sqrt(T))
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-
+    
     return (2 * is_call - 1) * S * norm.cdf((2 * is_call - 1) * d1) + \
-        (- 2 * is_call + 1) *  K * np.e ** (- mu * T) * norm.cdf((2 * is_call - 1) * d2)  
+        (- 2 * is_call + 1) *  K * np.e ** (- r * T) * norm.cdf((2 * is_call - 1) * d2)
+
+def black_scholes_delta(S, K, T, r, sigma, is_call=True):
+    if T <= 0:
+        if is_call:
+            return 1.0 if S > K else 0.0
+        else:
+            return 0.0 if S > K else -1.0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+
+    return norm.cdf(d1) - (not is_call) # N(d1) - 1 if is_call = False
 
 
-
-def bsm_until_maturity(dataframe, K, mu, sigma, T, is_call=True):
+def bsm_until_maturity(dataframe, K, mu, sigma, T, option_pricer, is_call=True) -> pd.DataFrame:
     bsm_prices = []
     
     # Loop over the rows of the dataframe and compute bsm price for all assets
@@ -29,7 +37,7 @@ def bsm_until_maturity(dataframe, K, mu, sigma, T, is_call=True):
         prices = row[1:].values  # Ignore time column
         
         # Call black_scholes_price for each price in the row
-        bsm_row_prices = [black_scholes_price(price, K, mu, sigma, t, is_call) for price in prices]
+        bsm_row_prices = [option_pricer(price, K, mu, sigma, t, is_call) for price in prices]
         bsm_prices.append(bsm_row_prices)
 
     # Convert the list of bsm prices to a DataFrame
@@ -41,14 +49,8 @@ def bsm_until_maturity(dataframe, K, mu, sigma, T, is_call=True):
 
     return df
 
-def bs_delta(S, K, T, r, sigma, is_call = True):
-    if T <= 0:
-        return 1.0 if S > K else 0.0 # Handle expiration case
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    delta = norm.cdf(d1) - (not is_call) # Formula for put is N(d1) - 1
-    return delta
 
-def delta_until_maturity(dataframe, K, mu, sigma, T, is_call=True):
+def delta_until_maturity(dataframe, K, mu, sigma, T, delta, is_call=True) -> pd.DataFrame:
     
     deltas = []
     
@@ -58,7 +60,7 @@ def delta_until_maturity(dataframe, K, mu, sigma, T, is_call=True):
         prices = row[1:].values  # Ignore time column
         
         # Call black_scholes_price for each price in the row
-        delta = [bs_delta(price, K, t, mu, sigma, is_call) for price in prices]
+        delta = [delta(price, K, t, mu, sigma, is_call) for price in prices]
         deltas.append(delta)
 
     # Convert the list of deltas to a DataFrame

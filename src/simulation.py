@@ -31,6 +31,44 @@ def GBM(S0_array, mu, sigma, T, dt, seed=None):
     
     return df
 
+def GBM_single_asset(S0, mu, sigma, T, dt, seed=None):
+    """
+    Simulate a Geometric Brownian Motion for a single asset and return
+    the time points and asset price path as NumPy arrays.
+    
+    Parameters:
+      - S0: Initial stock price (a scalar)
+      - mu: Expected return
+      - sigma: Volatility
+      - T: Total time (e.g., 1 year)
+      - dt: Time step
+      - seed: Random seed for reproducibility (optional)
+    
+    Returns:
+      - time: NumPy array of time points
+      - S: NumPy array of simulated asset prices
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    N = int(T / dt)
+    time = np.linspace(0, T, N + 1)
+    
+    # Generate Brownian increments for N steps
+    W = np.random.normal(0, np.sqrt(dt), N)
+    
+    # Compute cumulative log returns
+    drift = (mu - 0.5 * sigma**2) * dt
+    diffusion = sigma * W
+    log_returns = np.concatenate(([0], np.cumsum(drift + diffusion)))
+    
+    # Compute asset prices
+    S = S0 * np.exp(log_returns)
+    
+    return time, S
+
+
+
 def Heston():
     pass
 
