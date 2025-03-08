@@ -12,8 +12,9 @@ class HedgingEnv(VectorEnv):
         K,
         sigma,
         r,
-        num_simulation=10_000,
-        num_step=260,
+        num_simulation=100,
+        history_len=None,
+        num_step=250,
         reward_type="abs_diff",
     ):
         """
@@ -33,6 +34,7 @@ class HedgingEnv(VectorEnv):
         self.sigma = sigma
         self.r = r
         self.num_simulation = num_simulation
+        self.history_len = history_len
         self.num_step = num_step
         self.reward_type = reward_type
 
@@ -50,10 +52,16 @@ class HedgingEnv(VectorEnv):
         self.single_action_space = spaces.Box(
             low=0.0, high=1.0, shape=(1,), dtype=np.float32
         )
+        self.feature_dim = 11
         self.action_space = batch_space(self.single_action_space, self.num_envs)
-        self.single_observation_space = spaces.Box(
-            -np.inf, np.inf, shape=(11,), dtype=np.float32
-        )
+        if self.history_len is not None:
+            self.single_observation_space = spaces.Box(
+                -np.inf, np.inf, shape=(history_len, self.feature_dim), dtype=np.float32
+            )
+        else:
+            self.single_observation_space = spaces.Box(
+                -np.inf, np.inf, shape=(self.feature_dim,), dtype=np.float32
+            )
         self.observation_space = batch_space(
             self.single_observation_space, self.num_envs
         )
@@ -68,6 +76,11 @@ class HedgingEnv(VectorEnv):
         self._generate_simulations()
 
         self.current_step = 0
+
+        if self.history_len is not None:
+            self.observation_buff = np.zeros(
+                (self.num_envs, self.history_len, self.feature_dim)
+            )
 
         # Reset portfolio
         self.cash_account = np.zeros(
@@ -317,7 +330,14 @@ class HedgingEnv(VectorEnv):
         )
 
         # Reshape to have a flat batch dimension
-        return features.reshape(self.num_total_options, -1)
+        features = features.reshape(self.num_total_options, -1)
+        if self.history_len is not None:
+            self.observation_buff = np.concatenate(
+                (self.observation_buff[:, 1:, :], features[:, None, :]), axis=1
+            )
+            return self.observation_buff
+        else:
+            return features
 
     def _update_portfolio(self, stock_position):
         """Update portfolio based on stock positions"""
