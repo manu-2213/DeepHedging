@@ -161,39 +161,47 @@ def actor_inactor_training(
     )
 
     for epoch in range(num_epochs):
-        # Optional: different seed per epoch for environment variability
-        try:
-            env.reset(seed=epoch + 1000)
-        except Exception:
-            pass
-
+        # Prepare for a new epoch: force full reset by disabling soft reset
+        # The collector will do the actual reset.
+        # Access base env through GymWrapper
+        base_env = env._env if hasattr(env, '_env') else env
+        # Disable soft reset so collector's reset triggers full path regeneration
+        if hasattr(base_env, '_soft_reset_enabled'):
+            base_env._soft_reset_enabled = False
+        # Force full reset on next reset() call
+        if hasattr(base_env, '_last_reset_seed'):
+            base_env._last_reset_seed = None
+        
         for episode in range(num_episodes):
             actor_advantage_module.set_keys(value="state_value")
             inactor_advantage_module.set_keys(value="i_state_value")
 
             joint_policy = JointPolicy(
-            action_model.get_policy_operator(),
-            inaction_model.get_policy_operator(),
-            action_dim,
-            device,
-        )
+                action_model.get_policy_operator(),
+                inaction_model.get_policy_operator(),
+                action_dim,
+                device,
+            )
 
+            # Create collector ONCE per episode with reset_at_each_iter=False
+            # to allow multiple batches before environment reset
             collector = SyncDataCollector(
-            env,
-            joint_policy,
-            frames_per_batch=frames_per_batch,
-            total_frames=frames_per_batch,
-            device=device,
-        )
+                env,
+                joint_policy,
+                frames_per_batch=frames_per_batch,
+                total_frames=frames_per_batch,
+                device=device,
+                reset_at_each_iter=False,
+            )
 
             replay_buffer_actor = ReplayBuffer(
-            storage=LazyTensorStorage(max_size=frames_per_batch),
-            sampler=SamplerWithoutReplacement(),
-        )
+                storage=LazyTensorStorage(max_size=frames_per_batch),
+                sampler=SamplerWithoutReplacement(),
+            )
             replay_buffer_inactor = ReplayBuffer(
-            storage=LazyTensorStorage(max_size=frames_per_batch),
-            sampler=SamplerWithoutReplacement(),
-        )
+                storage=LazyTensorStorage(max_size=frames_per_batch),
+                sampler=SamplerWithoutReplacement(),
+            )
 
             last_batch = None
             current_policy_loss = 0.0
@@ -253,32 +261,25 @@ def actor_inactor_training(
 
             joint_policy.reset()
             avg_reward = last_batch["next", "reward"].mean().item()
-            if (episode + 1) % log_interval == 0 and last_batch is not None:
+            
+            # Print training progress at regular intervals
+            if (episode + 1) % log_interval == 0:
                 if episode % 3 == 0:
-                    policy_msg = (
-                        f"Policy Loss: {current_policy_loss:.6f}, "
-                        f"Critic: {a_loss_critic:.6f}, Obj: {a_loss_objective:.6f}, Ent: {a_loss_entropy:.6f}"
+                    actor_msg = (
+                        f"Actor Loss: {current_policy_loss:.6f} "
+                        f"(Critic: {a_loss_critic:.6f}, Obj: {a_loss_objective:.6f}, Ent: {a_loss_entropy:.6f})"
                     )
                 else:
-                    policy_msg = "Policy: No Update"
-                inaction_msg = (
-                    f"Inaction Loss: {inact_loss:.6f}, "
-                    f"Critic: {i_loss_critic:.6f}, Obj: {i_loss_objective:.6f}, Ent: {i_loss_entropy:.6f}"
+                    actor_msg = "Actor: No Update"
+                inactor_msg = (
+                    f"Inactor Loss: {inact_loss:.6f} "
+                    f"(Critic: {i_loss_critic:.6f}, Obj: {i_loss_objective:.6f}, Ent: {i_loss_entropy:.6f})"
                 )
                 print(
-                    f"\nEpisode {episode + 1}/{num_episodes}\n"
-                    f"{policy_msg}\n{inaction_msg}\nAvg. Reward: {avg_reward:.6f}"
+                    f"Epoch {epoch+1}/{num_epochs}, Episode {episode + 1}/{num_episodes} | "
+                    f"{actor_msg} | {inactor_msg} | Avg Reward: {avg_reward:.6f}"
                 )
-                episode_logs.append(
-                    {
-                        "epoch": epoch,
-                        "episode": episode + 1,
-                        "avg_reward": avg_reward,
-                        "actor_loss": current_policy_loss,
-                        "inactor_loss": inact_loss,
-                    }
-                )
-                
+            
             # Log to wandb: include actor losses only when the actor was updated
             log_payload = {
                 "epoch": epoch,

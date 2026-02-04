@@ -41,7 +41,7 @@ from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
 def main():
-
+    wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
 
@@ -49,27 +49,23 @@ def main():
     ppo_cfg = PPOConfig()
     trn_cfg = TrainingConfig()
 
-    
-
-    S0 = np.array([50.0, 100.0, 200.0])
-    K = np.array([[45.0, 55.0], [90.0, 110.0], [180.0, 220.0]])
-    maturity = 1.0
-    r = 0.05
-    sigma = np.array([0.15, 0.2, 0.25])
-    num_paths = 30
-    num_steps = 250
+    S0, K, sigma = load_bsm_data()
+    maturity = env_cfg.maturity
+    r = env_cfg.r
+    num_paths = env_cfg.num_paths
+    num_steps = env_cfg.num_steps
     history_len = 1
     feature_dim = 11
-    hidden_dim = trn_cfg.hidden_size / np.sqrt(2)
+    hidden_dim = int(trn_cfg.hidden_size / np.sqrt(2))
     action_dim = 1 
     transaction_cost = env_cfg.transaction_cost
     transaction_fee_rate = env_cfg.transaction_fee_rate
 
-    clip_param = 0.2
-    value_coef = 0.1
-    entropy_coeff = 0.001
-    gamma = 0.99
-    lmbda = 0.95
+    clip_param = ppo_cfg.clip_param
+    value_coef = ppo_cfg.value_coef
+    entropy_coeff = ppo_cfg.entropy_coeff
+    gamma = ppo_cfg.gamma
+    lmbda = ppo_cfg.lmbda
 
     base_env = HedgeCallBS(
         S0, K, maturity, r, sigma, num_paths, num_steps,
@@ -136,24 +132,17 @@ def main():
         value="i_state_value"
     )
 
-    lr=5e-5
+    lr = ppo_cfg.learning_rate
     optim_actor = torch.optim.Adam(actor_loss_module.parameters(), lr=lr)
     optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=lr)
 
-    num_epochs = 1
-    num_episodes = 20
-    policy_epochs = 1
-    inaction_epochs = 1
+    num_episodes = trn_cfg.num_episodes
+    policy_epochs = trn_cfg.policy_epochs
+    inaction_epochs = trn_cfg.inaction_epochs
     frames_per_batch = env.num_envs * num_steps
-    sub_batch_num = 10
+    sub_batch_num = trn_cfg.sub_batch_num
     sub_batch_size = frames_per_batch // sub_batch_num
     frames_per_batch, sub_batch_size
-
-
-    problem_name = "complex mlp"
-    seed = 1
-
-    wandb.init()
 
     action_model = action_training(env, 
                     action_model,  
@@ -191,7 +180,7 @@ def main():
     action_model, inaction_model = train_stats["action_model"], train_stats["inaction_model"]
 
     base_env = HedgeCallBS(
-        S0, K, maturity, r, sigma, 5, num_steps,
+        S0, K, maturity, r, sigma, num_paths, num_steps,
         history_len=history_len,
         transaction_cost=transaction_cost,
         transaction_fee_rate=transaction_fee_rate
@@ -205,7 +194,7 @@ def main():
     )
 
     # Use test_model to evaluate and log results to wandb
-    test_model(base_env, joint_policy, num_steps, device, plotting=False)
+    test_model(base_env, joint_policy, num_steps, device, plotting=True)
 
 if __name__ == "__main__":
     main()
