@@ -26,6 +26,14 @@ def action_training(env,
     reward_history = []
 
     global_episode_idx = 0  # counts across epochs
+    
+    # Detect which value keys the network uses (RNN vs MLP)
+    model_out_keys = model.get_value_operator().out_keys
+    value_key = "a_state_value" if "a_state_value" in model_out_keys else "state_value"
+    
+    # Set keys on advantage and loss modules
+    advantage_module.set_keys(value=value_key)
+    loss_module.set_keys(value=value_key)
 
     scheduler = CosineAnnealingLR(
         optim,
@@ -148,6 +156,14 @@ def actor_inactor_training(
 
     if CosineAnnealingLR is None:
         raise ImportError("torch.optim.lr_scheduler.CosineAnnealingLR is required for scheduling")
+    
+    # Create joint policy from both action and inaction models
+    joint_policy = JointPolicy(
+        action_model.get_policy_operator(),
+        inaction_model.get_policy_operator(),
+        action_dim,
+        device,
+    )
 
     actor_scheduler = CosineAnnealingLR(
         optim_actor,
@@ -161,6 +177,20 @@ def actor_inactor_training(
     )
 
     for epoch in range(num_epochs):
+        # Detect which value keys the networks use (RNN vs MLP)
+        actor_out_keys = action_model.get_value_operator().out_keys
+        inactor_out_keys = inaction_model.get_value_operator().out_keys
+        
+        actor_value_key = "a_state_value" if "a_state_value" in actor_out_keys else "state_value"
+        inactor_value_key = "i_state_value" if "i_state_value" in inactor_out_keys else "state_value"
+        
+        actor_advantage_module.set_keys(value=actor_value_key)
+        inactor_advantage_module.set_keys(value=inactor_value_key)
+        
+        # Also set keys on loss modules
+        actor_loss_module.set_keys(value=actor_value_key)
+        inactor_loss_module.set_keys(value=inactor_value_key)
+        
         # Prepare for a new epoch: force full reset by disabling soft reset
         # The collector will do the actual reset.
         # Access base env through GymWrapper
@@ -173,16 +203,6 @@ def actor_inactor_training(
             base_env._last_reset_seed = None
         
         for episode in range(num_episodes):
-            actor_advantage_module.set_keys(value="state_value")
-            inactor_advantage_module.set_keys(value="i_state_value")
-
-            joint_policy = JointPolicy(
-                action_model.get_policy_operator(),
-                inaction_model.get_policy_operator(),
-                action_dim,
-                device,
-            )
-
             # Create collector ONCE per episode with reset_at_each_iter=False
             # to allow multiple batches before environment reset
             collector = SyncDataCollector(

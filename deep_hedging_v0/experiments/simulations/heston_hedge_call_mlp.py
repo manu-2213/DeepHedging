@@ -90,7 +90,7 @@ lmbda = ppo_cfg.lmbda
 wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
 
 model = create_ppo_mlp_actor(input_dim=input_dim, action_dim=action_dim,
-                             hidden_dim=hidden_size, device=device)
+                             hidden_dim=hidden_size, device=device, action_low=0.0, action_high=1.0)
 
 model.to(device)
 

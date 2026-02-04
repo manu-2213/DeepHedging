@@ -83,7 +83,7 @@ lmbda = ppo_cfg.lmbda
 wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
 
 model = create_ppo_mlp_actor(input_dim=input_dim, action_dim=action_dim,
-                             hidden_dim=hidden_size)
+                             hidden_dim=hidden_size, action_low=-1.0, action_high=1.0)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)

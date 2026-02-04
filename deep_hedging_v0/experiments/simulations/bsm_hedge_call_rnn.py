@@ -89,7 +89,7 @@ def main():
     lmbda = ppo_cfg.lmbda
 
     model = create_ppo_rnn_actor(input_dim=input_dim, action_dim=action_dim,
-                                 hidden_dim=hidden_size).to(device)
+                                 hidden_dim=hidden_size, action_low=0.0, action_high=1.0).to(device)
 
     advantage_module = GAE(
         gamma=gamma,

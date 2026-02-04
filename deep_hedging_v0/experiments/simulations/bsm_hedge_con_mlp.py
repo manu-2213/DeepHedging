@@ -90,7 +90,8 @@ def main():
         action_dim=action_dim,
         hidden_dim=hidden_size,
         device=device,
-        action_low=0.0,
+        action_low=-1.0,
+        action_high=1.0,
     ).to(device)
 
     advantage_module = GAE(

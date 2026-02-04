@@ -19,7 +19,7 @@ DEFAULT_WANDB_PROJECT = "deephedging_local_test"
 class EnvConfig:
     maturity: float = 1.0
     r: float = 0.01
-    num_paths: int = 5 #100
+    num_paths: int = 50
     num_paths_heston: int = 20 # Very compute heavy
     num_steps: int = 250
     history_len: int = 1
@@ -44,9 +44,9 @@ class PPOConfig:
 @dataclass
 class TrainingConfig:
     num_epochs: int = 30
-    policy_epochs: int = 2 #20
-    inaction_epochs: int = 1 #10
-    num_episodes: int = 50 #200
+    policy_epochs: int = 20
+    inaction_epochs: int = 10
+    num_episodes: int = 200
     sub_batch_num: int = 10
     hidden_size: int = 128
 

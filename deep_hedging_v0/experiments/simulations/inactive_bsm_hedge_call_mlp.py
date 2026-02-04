@@ -41,6 +41,7 @@ from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
 def main():
+    
     wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
@@ -84,6 +85,8 @@ def main():
         action_dim=action_dim,
         env=env,
         device=device,
+        action_low=0.0,
+        action_high=1.0
     )
 
     action_model.to(device)
@@ -93,9 +96,10 @@ def main():
         gamma=gamma,
         lmbda=lmbda,
         value_network=action_model.get_value_operator(),
-        shifted=True # make sure use this one for RNN
+        shifted=True
     )
-    actor_advantage_module.set_keys(value="state_value")
+    # Note: training_loop will set this to a_state_value, but MLP models output state_value
+    # So we don't set it here and let training_loop handle it
 
     actor_loss_module = ClipPPOLoss(
         actor_network=action_model.get_policy_operator(),
@@ -105,11 +109,7 @@ def main():
         value_coef=value_coef,
     )
 
-    actor_loss_module.set_keys(
-        action="action",
-        sample_log_prob="action_log_prob",
-        value="state_value"
-    )
+    # Note: training_loop will handle setting keys for loss module
 
     inactor_advantage_module = GAE(
         gamma=gamma,
@@ -126,11 +126,7 @@ def main():
         value_coef=value_coef,
     )
 
-    inactor_loss_module.set_keys(
-        action="inact",
-        sample_log_prob="inact_log_prob",
-        value="i_state_value"
-    )
+    # Note: training_loop will handle setting keys for loss module
 
     lr = ppo_cfg.learning_rate
     optim_actor = torch.optim.Adam(actor_loss_module.parameters(), lr=lr)
@@ -155,6 +151,7 @@ def main():
                     frames_per_batch,
                     sub_batch_num,
                     sub_batch_size,
+                    1,
                     ) # TorchRL bug
 
     train_stats = actor_inactor_training(
