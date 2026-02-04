@@ -1,0 +1,161 @@
+import os
+import sys
+import numpy as np
+import torch
+import wandb
+import argparse
+
+# --- Add your project root to sys.path (like you already did) ---
+module_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+if module_path not in sys.path:
+    sys.path.append(module_path)
+
+import numpy as np
+
+# save the original method once
+if not hasattr(torch.Tensor, "_orig_numpy"):
+    torch.Tensor._orig_numpy = torch.Tensor.numpy
+
+    def safe_numpy(self, *args, **kwargs):
+        # transparently move tensor to CPU before numpy() if it's on GPU
+        if self.is_cuda:
+            return self.detach().cpu().numpy()
+        return self._orig_numpy(*args, **kwargs)
+
+    torch.Tensor.numpy = safe_numpy
+
+from hedging.envs import HedgeDocBS
+from experiments.utils.ppo_rnn_actor import create_ppo_rnn_actor_exotic
+from experiments.utils.training_loop import action_training
+from experiments.utils.testing import test_model
+from experiments.utils.sim_config import (
+    EnvConfig,
+    PPOConfig,
+    TrainingConfig,
+    DEFAULT_WANDB_PROJECT,
+    load_bsm_data,
+    default_barriers,
+    training_to_wandb_config,
+)
+
+from torchrl.envs import GymWrapper
+from torchrl.objectives import ClipPPOLoss
+from torchrl.objectives.value import GAE
+
+
+def main():
+    # 1. Fixed seed, since we're just testing locally
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+
+    seed = args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    S0, K, sigma = load_bsm_data()
+    H = default_barriers(K)
+    maturity = 1.0
+    r = 0.01
+    env_cfg = EnvConfig()
+    num_paths = env_cfg.num_paths
+    num_steps = env_cfg.num_steps
+    history_len = env_cfg.history_len
+    input_dim = 17
+    action_dim = 2
+    hidden_size = 64
+    transaction_cost = env_cfg.transaction_cost
+    transaction_fee_rate = env_cfg.transaction_fee_rate
+
+    base_env = HedgeDocBS(S0, K, H, maturity, r, sigma, num_paths, num_steps, history_len=history_len,
+                        transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate)
+    env = GymWrapper(base_env)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    training_cfg = TrainingConfig(num_epochs=20, num_episodes=200)
+    frames_per_batch = env.num_envs * num_steps
+    sub_batch_num = training_cfg.sub_batch_num
+    sub_batch_size = frames_per_batch // sub_batch_num
+
+    # PPO + GAE params
+    ppo_cfg = PPOConfig(learning_rate=1e-4)
+    clip_param = ppo_cfg.clip_param
+    value_coef = ppo_cfg.value_coef
+    entropy_coeff = ppo_cfg.entropy_coeff
+    gamma = ppo_cfg.gamma
+    lmbda = ppo_cfg.lmbda
+
+    model = create_ppo_rnn_actor_exotic(input_dim=input_dim, action_dim=action_dim, 
+                                    hidden_dim=hidden_size).to(device)
+
+    advantage_module = GAE(
+        gamma=gamma,
+        lmbda=lmbda,
+        value_network=model.get_value_operator(),
+        shifted=True,
+    )
+
+    loss_module = ClipPPOLoss(
+        actor_network=model.get_policy_operator(),
+        critic_network=model.get_value_operator(),
+        clip_epsilon=clip_param,
+        entropy_coeff=entropy_coeff,
+        value_coef=value_coef,
+    )
+
+    optim = torch.optim.Adam(loss_module.parameters(), lr=ppo_cfg.learning_rate)
+
+    num_epochs = training_cfg.num_epochs
+    num_episodes = training_cfg.num_episodes
+
+    problem_name = "bsm_doc_rnn"
+
+    wandb_config = training_to_wandb_config(
+        training_cfg,
+        ppo_cfg,
+        extra={
+            "problem": problem_name,
+            "seed": seed,
+            "frames_per_batch": frames_per_batch,
+            "sub_batch_size": sub_batch_size,
+            "hidden_size": hidden_size,
+            "input_dim": input_dim,
+            "action_dim": action_dim,
+            "transaction_cost": transaction_cost,
+            "transaction_fee_rate": transaction_fee_rate,
+        },
+    )
+
+    wandb.init(
+        project=DEFAULT_WANDB_PROJECT,
+        name=f"{problem_name}_seed{seed}",
+        group=problem_name,
+        config=wandb_config,
+    )
+
+    model = action_training(
+        env,
+        model,
+        num_epochs,
+        num_episodes,
+        device,
+        advantage_module,
+        loss_module,
+        optim,
+        frames_per_batch,
+        sub_batch_num,
+        sub_batch_size,
+        log_frquency=1,  # log every episode
+    )
+
+    
+    test_env = HedgeDocBS(S0, K, H, maturity, r, sigma, num_paths, num_steps, history_len=history_len,
+                        transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate)
+    test_model(test_env, model, num_steps, device, plotting=False)
+
+    # Close the W&B run cleanly
+    wandb.finish()
+
+if __name__ == "__main__":
+    main()

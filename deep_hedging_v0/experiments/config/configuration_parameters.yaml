@@ -1,0 +1,267 @@
+defaults:
+  # ---- PPO / RL parameters ----
+  num_epochs: 20
+  num_episodes: 200
+  gamma: 0.99
+  lmbda: 0.95
+  clip_param: 0.2
+  value_coef: 0.1
+  entropy_coef: 0.0
+  lr: 1e-4
+
+  # ---- NN defaults ----
+  hidden_size: 64
+  input_dim: 11          # overridden for exotic options
+  feature_dim: 11        # matches input_dim
+  action_dim: 1          # overridden for exotic options
+  device: cuda
+
+  # ---- Environment base params ----
+  num_paths: 1
+  num_steps: 250
+  maturity: 1.0
+  r: 0.03
+  transaction_cost: true
+  transaction_fee_rate: 1e-3
+
+  # ---- Initial assets and strikes ----
+  S0: [100, 120, 80]
+  K: [[90, 100, 110], [100, 120, 140], [70, 80, 90]]
+  P: [[1.0]]
+
+  # ---- Default Heston parameters ----
+  v0: [0.05, 0.04, 0.06]
+  theta: [0.05, 0.035, 0.045]
+  rho: [-0.8, -0.6, -0.5]
+  kappa: [5.0, 2.5, 3.0]
+  xi: [0.5, 0.4, 0.55]
+
+  # ---- Default model type ----
+  model_type: mlp
+  history_len: 1
+
+
+# ==========================================================
+# EXPERIMENTS (24 total)
+# ==========================================================
+experiments:
+  # ---------- Black–Scholes Vanilla ----------
+  - name: bs_call_mlp_seed1
+    env: HedgeCallBS
+    model_type: mlp
+    history_len: 1
+    feature_dim: 11
+    action_dim: 1
+    seed: 1000
+    description: "BS Call (vanilla), MLP, seed 1000"
+
+  - name: bs_call_mlp_seed2
+    env: HedgeCallBS
+    model_type: mlp
+    history_len: 1
+    feature_dim: 11
+    action_dim: 1
+    seed: 1001
+    description: "BS Call (vanilla), MLP, seed 1001"
+
+  - name: bs_call_rnn_seed1
+    env: HedgeCallBS
+    model_type: rnn
+    history_len: 5
+    feature_dim: 11
+    action_dim: 1
+    seed: 1000
+    description: "BS Call (vanilla), RNN, seed 1000"
+
+  - name: bs_call_rnn_seed2
+    env: HedgeCallBS
+    model_type: rnn
+    history_len: 5
+    feature_dim: 11
+    action_dim: 1
+    seed: 1001
+    description: "BS Call (vanilla), RNN, seed 1001"
+
+  # ---------- Black–Scholes Exotic ----------
+  - name: bs_doc_mlp_seed1
+    env: HedgeDocBS
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "BS Down-and-Out (exotic), MLP, seed 1000"
+
+  - name: bs_doc_mlp_seed2
+    env: HedgeDocBS
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "BS Down-and-Out (exotic), MLP, seed 1001"
+
+  - name: bs_doc_rnn_seed1
+    env: HedgeDocBS
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "BS Down-and-Out (exotic), RNN, seed 1000"
+
+  - name: bs_doc_rnn_seed2
+    env: HedgeDocBS
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "BS Down-and-Out (exotic), RNN, seed 1001"
+
+  - name: bs_con_mlp_seed1
+    env: HedgeConcBS
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "BS Cash-or-Nothing (exotic), MLP, seed 1000"
+
+  - name: bs_con_mlp_seed2
+    env: HedgeConcBS
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "BS Cash-or-Nothing (exotic), MLP, seed 1001"
+
+  - name: bs_con_rnn_seed1
+    env: HedgeConcBS
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "BS Cash-or-Nothing (exotic), RNN, seed 1000"
+
+  - name: bs_con_rnn_seed2
+    env: HedgeConcBS
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "BS Cash-or-Nothing (exotic), RNN, seed 1001"
+
+
+  # ---------- Heston Vanilla ----------
+  - name: heston_call_mlp_seed1
+    env: HedgeCallHeston
+    model_type: mlp
+    history_len: 1
+    feature_dim: 11
+    action_dim: 1
+    seed: 1000
+    description: "Heston Call (vanilla), MLP, seed 1000"
+
+  - name: heston_call_mlp_seed2
+    env: HedgeCallHeston
+    model_type: mlp
+    history_len: 1
+    feature_dim: 11
+    action_dim: 1
+    seed: 1001
+    description: "Heston Call (vanilla), MLP, seed 1001"
+
+  - name: heston_call_rnn_seed1
+    env: HedgeCallHeston
+    model_type: rnn
+    history_len: 5
+    feature_dim: 11
+    action_dim: 1
+    seed: 1000
+    description: "Heston Call (vanilla), RNN, seed 1000"
+
+  - name: heston_call_rnn_seed2
+    env: HedgeCallHeston
+    model_type: rnn
+    history_len: 5
+    feature_dim: 11
+    action_dim: 1
+    seed: 1001
+    description: "Heston Call (vanilla), RNN, seed 1001"
+
+  # ---------- Heston Exotic ----------
+  - name: heston_doc_mlp_seed1
+    env: HedgeDocHeston
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "Heston Down-and-Out (exotic), MLP, seed 1000"
+
+  - name: heston_doc_mlp_seed2
+    env: HedgeDocHeston
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "Heston Down-and-Out (exotic), MLP, seed 1001"
+
+  - name: heston_doc_rnn_seed1
+    env: HedgeDocHeston
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "Heston Down-and-Out (exotic), RNN, seed 1000"
+
+  - name: heston_doc_rnn_seed2
+    env: HedgeDocHeston
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "Heston Down-and-Out (exotic), RNN, seed 1001"
+
+  - name: heston_con_mlp_seed1
+    env: HedgeConcHeston
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "Heston Cash-or-Nothing (exotic), MLP, seed 1000"
+
+  - name: heston_con_mlp_seed2
+    env: HedgeConcHeston
+    model_type: mlp
+    history_len: 1
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "Heston Cash-or-Nothing (exotic), MLP, seed 1001"
+
+  - name: heston_con_rnn_seed1
+    env: HedgeConcHeston
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1000
+    description: "Heston Cash-or-Nothing (exotic), RNN, seed 1000"
+
+  - name: heston_con_rnn_seed2
+    env: HedgeConcHeston
+    model_type: rnn
+    history_len: 5
+    feature_dim: 17
+    action_dim: 2
+    seed: 1001
+    description: "Heston Cash-or-Nothing (exotic), RNN, seed 1001"

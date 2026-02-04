@@ -1,0 +1,321 @@
+import torch
+import numpy as np
+from torchrl.collectors import SyncDataCollector
+from torchrl.data.replay_buffers import ReplayBuffer
+from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
+from torchrl.data.replay_buffers.storages import LazyTensorStorage
+from .joint_policy import JointPolicy
+import wandb
+from torch.optim.lr_scheduler import CosineAnnealingLR 
+
+def action_training(env, 
+                    model,  
+                    num_epochs,
+                    num_episodes, 
+                    device,
+                    advantage_module,
+                    loss_module,
+                    optim,
+                    frames_per_batch,
+                    sub_batch_num,
+                    sub_batch_size,
+                    log_frquency=10,
+                    seed=None):
+    
+    # keep full reward curve for this run
+    reward_history = []
+
+    global_episode_idx = 0  # counts across epochs
+
+    scheduler = CosineAnnealingLR(
+        optim,
+        T_max=max(1, num_epochs),
+        eta_min=0.0,
+    )
+
+    for epoch in range(num_epochs):
+        # Prepare for a new epoch: force full reset by disabling soft reset
+        # and setting a new seed. The collector will do the actual reset.
+        epoch_seed = epoch if seed is None else seed + epoch
+        # Access base env through GymWrapper
+        base_env = env._env if hasattr(env, '_env') else env
+        # Disable soft reset so collector's reset triggers full path regeneration
+        if hasattr(base_env, '_soft_reset_enabled'):
+            base_env._soft_reset_enabled = False
+        # Set the seed for this epoch (collector will call reset with seed=None,
+        # but the RNG will be seeded from this)
+        if hasattr(base_env, '_last_reset_seed'):
+            base_env._last_reset_seed = None  # Force full reset on next reset() call
+        
+        # Create collector ONCE per epoch - iterating gives us num_episodes batches
+        # The collector will call env.reset() internally, triggering ONE full reset
+        collector = SyncDataCollector(
+            env,
+            model.get_policy_operator(),
+            frames_per_batch=frames_per_batch,
+            total_frames=frames_per_batch * num_episodes,  # Collect all episodes worth
+            device=device,
+            reset_at_each_iter=False,  # Don't reset between batches
+        )
+        
+        episode = 0
+        for batch in collector:
+            replay_buffer = ReplayBuffer(
+                storage=LazyTensorStorage(max_size=frames_per_batch),
+                sampler=SamplerWithoutReplacement(),
+            )
+
+            # compute advantages
+            advantage_module(batch)
+
+            # store batch in replay buffer
+            replay_buffer.extend(batch.reshape(-1).cpu())
+
+            # PPO updates on sub-batches
+            for _ in range(sub_batch_num):
+                subdata = replay_buffer.sample(sub_batch_size)
+                optim.zero_grad()
+                loss = loss_module(subdata.to(device))
+
+                loss_critic = loss["loss_critic"]
+                loss_objective = loss["loss_objective"]
+                loss_entropy = loss["loss_entropy"]
+                loss_sum = loss_critic + loss_objective + loss_entropy
+
+                loss_sum.backward()
+                torch.nn.utils.clip_grad_norm_(loss_module.parameters(), max_norm=1.0)
+                for param in loss_module.parameters():
+                    if param.grad is not None:
+                        param.grad = torch.nan_to_num(param.grad)
+                optim.step()
+
+            # average reward in this batch (all paths, all steps)
+            avg_reward = batch["next", "reward"].mean().item()
+
+            # after collector loop (one batch), log reward and losses for this episode
+            reward_history.append(avg_reward)
+
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "episode": episode,
+                    "global_episode": global_episode_idx,
+                    "loss_total": loss_sum.item(),
+                    "loss_critic": loss_critic.item(),
+                    "loss_objective": loss_objective.item(),
+                    "loss_entropy": loss_entropy.item(),
+                    "avg_reward": avg_reward,
+                }
+            )
+
+            global_episode_idx += 1
+
+            if (episode + 1) % log_frquency == 0:
+                print(
+                    f"Epoch {epoch+1}/{num_epochs}, "
+                    f"Episode {episode + 1}/{num_episodes}, "
+                    f"Loss: {loss_sum.item():.4f}, "
+                    f"Avg. Reward: {avg_reward:.4f}"
+                )
+            
+            episode += 1
+        scheduler.step()
+        wandb.log({"learning_rate": scheduler.get_last_lr()[0]}, commit=False)
+
+    return model
+
+def actor_inactor_training(
+    env,
+    action_model,
+    inaction_model,
+    actor_advantage_module,
+    inactor_advantage_module,
+    actor_loss_module,
+    inactor_loss_module,
+    optim_actor,
+    optim_inactor,
+    frames_per_batch,
+    num_epochs,
+    num_episodes,
+    sub_batch_num,
+    sub_batch_size,
+    device,
+    action_dim,
+    log_interval=10,
+):
+    episode_logs = []
+    global_episode_idx = 0
+
+    if CosineAnnealingLR is None:
+        raise ImportError("torch.optim.lr_scheduler.CosineAnnealingLR is required for scheduling")
+
+    actor_scheduler = CosineAnnealingLR(
+        optim_actor,
+        T_max=max(1, num_epochs),
+        eta_min=0.0,
+    )
+    inactor_scheduler = CosineAnnealingLR(
+        optim_inactor,
+        T_max=max(1, num_epochs),
+        eta_min=0.0,
+    )
+
+    for epoch in range(num_epochs):
+        # Optional: different seed per epoch for environment variability
+        try:
+            env.reset(seed=epoch + 1000)
+        except Exception:
+            pass
+
+        for episode in range(num_episodes):
+            actor_advantage_module.set_keys(value="state_value")
+            inactor_advantage_module.set_keys(value="i_state_value")
+
+            joint_policy = JointPolicy(
+            action_model.get_policy_operator(),
+            inaction_model.get_policy_operator(),
+            action_dim,
+            device,
+        )
+
+            collector = SyncDataCollector(
+            env,
+            joint_policy,
+            frames_per_batch=frames_per_batch,
+            total_frames=frames_per_batch,
+            device=device,
+        )
+
+            replay_buffer_actor = ReplayBuffer(
+            storage=LazyTensorStorage(max_size=frames_per_batch),
+            sampler=SamplerWithoutReplacement(),
+        )
+            replay_buffer_inactor = ReplayBuffer(
+            storage=LazyTensorStorage(max_size=frames_per_batch),
+            sampler=SamplerWithoutReplacement(),
+        )
+
+            last_batch = None
+            current_policy_loss = 0.0
+            inact_loss = 0.0
+            a_loss_critic = a_loss_objective = a_loss_entropy = float("nan")
+            i_loss_critic = i_loss_objective = i_loss_entropy = float("nan")
+            avg_reward = float("nan")
+
+            for batch in collector:
+                last_batch = batch
+                batch_actor = batch.clone(False)
+                batch_inactor = batch.clone(False)
+
+                if "original_action" in batch_actor.keys():
+                    batch_actor.set_("action", batch_actor["original_action"])
+
+                actor_advantage_module(batch_actor)
+                inactor_advantage_module(batch_inactor)
+
+                replay_buffer_actor.extend(batch_actor.reshape(-1).cpu())
+                replay_buffer_inactor.extend(batch_inactor.reshape(-1).cpu())
+
+                for _ in range(sub_batch_num):
+                    subdata = replay_buffer_inactor.sample(sub_batch_size).to(device)
+                    optim_inactor.zero_grad()
+                    loss = inactor_loss_module(subdata)
+                    loss_sum = loss["loss_critic"] + loss["loss_objective"] + loss["loss_entropy"]
+                    loss_sum.backward()
+                    torch.nn.utils.clip_grad_norm_(inactor_loss_module.parameters(), max_norm=1.0)
+                    for p in inactor_loss_module.parameters():
+                        if p.grad is not None:
+                            p.grad = torch.nan_to_num(p.grad)
+                    optim_inactor.step()
+
+                i_loss_critic = loss["loss_critic"].item()
+                i_loss_objective = loss["loss_objective"].item()
+                i_loss_entropy = loss["loss_entropy"].item()
+                inact_loss = loss_sum.item()
+
+                if episode % 3 == 0:
+                    for _ in range(sub_batch_num):
+                        subdata = replay_buffer_actor.sample(sub_batch_size).to(device)
+                        optim_actor.zero_grad()
+                        loss = actor_loss_module(subdata)
+                        loss_sum = loss["loss_critic"] + loss["loss_objective"] + loss["loss_entropy"]
+                        loss_sum.backward()
+                        torch.nn.utils.clip_grad_norm_(actor_loss_module.parameters(), max_norm=1.0)
+                        for p in actor_loss_module.parameters():
+                            if p.grad is not None:
+                                p.grad = torch.nan_to_num(p.grad)
+                        optim_actor.step()
+
+                    current_policy_loss = loss_sum.item()
+                    a_loss_critic = loss["loss_critic"].item()
+                    a_loss_objective = loss["loss_objective"].item()
+                    a_loss_entropy = loss["loss_entropy"].item()
+
+            joint_policy.reset()
+            avg_reward = last_batch["next", "reward"].mean().item()
+            if (episode + 1) % log_interval == 0 and last_batch is not None:
+                if episode % 3 == 0:
+                    policy_msg = (
+                        f"Policy Loss: {current_policy_loss:.6f}, "
+                        f"Critic: {a_loss_critic:.6f}, Obj: {a_loss_objective:.6f}, Ent: {a_loss_entropy:.6f}"
+                    )
+                else:
+                    policy_msg = "Policy: No Update"
+                inaction_msg = (
+                    f"Inaction Loss: {inact_loss:.6f}, "
+                    f"Critic: {i_loss_critic:.6f}, Obj: {i_loss_objective:.6f}, Ent: {i_loss_entropy:.6f}"
+                )
+                print(
+                    f"\nEpisode {episode + 1}/{num_episodes}\n"
+                    f"{policy_msg}\n{inaction_msg}\nAvg. Reward: {avg_reward:.6f}"
+                )
+                episode_logs.append(
+                    {
+                        "epoch": epoch,
+                        "episode": episode + 1,
+                        "avg_reward": avg_reward,
+                        "actor_loss": current_policy_loss,
+                        "inactor_loss": inact_loss,
+                    }
+                )
+                
+            # Log to wandb: include actor losses only when the actor was updated
+            log_payload = {
+                "epoch": epoch,
+                "episode": episode,
+                "global_episode": global_episode_idx,
+                "avg_reward": avg_reward,
+                # Inactor metrics are updated every episode
+                "inactor_loss_total": inact_loss,
+                "inactor_loss_critic": i_loss_critic,
+                "inactor_loss_objective": i_loss_objective,
+                "inactor_loss_entropy": i_loss_entropy,
+            }
+
+            if episode % 3 == 0:
+                log_payload.update({
+                    "actor_loss_total": current_policy_loss,
+                    "actor_loss_critic": a_loss_critic,
+                    "actor_loss_objective": a_loss_objective,
+                    "actor_loss_entropy": a_loss_entropy,
+                })
+
+            wandb.log(log_payload)
+
+            global_episode_idx += 1 
+
+        actor_scheduler.step()
+        inactor_scheduler.step()
+        wandb.log(
+            {
+                "actor_learning_rate": actor_scheduler.get_last_lr()[0],
+                "inactor_learning_rate": inactor_scheduler.get_last_lr()[0],
+            },
+            commit=False,
+        )
+
+    return {
+        "action_model": action_model,
+        "inaction_model": inaction_model,
+        "logs": episode_logs,
+    }
