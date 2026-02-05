@@ -19,11 +19,11 @@ DEFAULT_WANDB_PROJECT = "deephedging_local_test"
 class EnvConfig:
     maturity: float = 1.0
     r: float = 0.01
-    num_paths: int = 50
+    num_paths: int = 100
     num_paths_heston: int = 20 # Very compute heavy
     num_steps: int = 250
     history_len: int = 1
-    history_len_rnn: int = 10
+    history_len_rnn: int = 5
     transaction_cost: bool = True
     transaction_fee_rate: float = 1e-3
     trap: int = 1
@@ -37,8 +37,8 @@ class PPOConfig:
     entropy_coeff: float = 0.001
     gamma: float = 0.99
     lmbda: float = 0.95
-    learning_rate: float = 1e-4
-    learning_rate_ex: float = 1e-5
+    learning_rate: float = 5e-5
+    learning_rate_ex: float = 5e-6
 
 
 @dataclass
@@ -47,7 +47,7 @@ class TrainingConfig:
     policy_epochs: int = 20
     inaction_epochs: int = 10
     num_episodes: int = 200
-    sub_batch_num: int = 10
+    sub_batch_num: int = 16
     hidden_size: int = 128
 
 

@@ -1,0 +1,260 @@
+================================================================================
+DEEP HEDGING WITH DECOUPLED ACTOR-INACTOR ARCHITECTURE
+Detailed Experimental Analysis
+================================================================================
+
+OVERVIEW OF THE NOVEL APPROACH
+--------------------------------------------------------------------------------
+
+This research introduces a decoupled "Actor-Inactor" architecture for deep 
+reinforcement learning-based dynamic hedging. The key innovation is separating 
+the hedging decision into two independent neural networks:
+
+1. Actor Network (Action Model): Determines the optimal hedge ratio (how much to trade)
+2. Inactor Network (Inaction Model): Decides whether to execute the trade or maintain 
+   the previous position
+
+This architecture is compared against a baseline that uses a single unified policy 
+network. The decoupled approach is designed to reduce unnecessary trading activity 
+and transaction costs.
+
+
+================================================================================
+EXPERIMENTAL DESIGN: 24 Experiments × 10 Seeds = 240 Total Runs
+================================================================================
+
+The experiments are organized as a 2 × 2 × 3 × 2 factorial design:
+
+Dimension           | Options
+--------------------|----------------------------------------------------------
+Architecture        | Baseline (single network) vs. Decoupled Actor-Inactor
+Model Type          | MLP vs. RNN (LSTM)
+Option Type         | Vanilla Call, Down-and-Out Call (DOC), Cash-or-Nothing (CON)
+Market Model        | Black-Scholes (BSM) vs. Heston (stochastic volatility)
+
+This yields 24 unique experiment configurations, each run 10 times with different 
+random seeds for statistical robustness.
+
+
+================================================================================
+ARCHITECTURE DETAILS
+================================================================================
+
+1. BASELINE ARCHITECTURE (Single Policy Network)
+--------------------------------------------------------------------------------
+
+MLP Variant (ppo_mlp_actor.py):
+- Feature Extractor: 2-layer MLP with Tanh activation
+  Linear(input_dim → hidden_dim) → Tanh → Linear(hidden_dim → hidden_dim) → Tanh
+- Policy Head: Linear(hidden_dim → 2×action_dim) + NormalParamExtractor → TanhNormal distribution
+- Value Head: Linear(hidden_dim → 8) → Tanh → Linear(8 → 1)
+- Action Bounds: [0, 1] for vanilla calls; [-1, 1] for exotic options
+
+RNN Variant (ppo_rnn_actor.py):
+- Feature Extractor: 2-layer LSTM (num_layers=2, batch_first=True, no dropout)
+  Takes last time step output: output[..., -1, :]
+- Policy Head: Same as MLP with LogitNormal (vanilla) or TanhNormal (exotic) distribution
+- Value Head: Linear(hidden_dim → hidden_dim/2) → Tanh → Linear(hidden_dim/2 → 1)
+
+
+2. DECOUPLED ACTOR-INACTOR ARCHITECTURE (Novel Contribution)
+--------------------------------------------------------------------------------
+
+MLP Variant (actor_inactor_mlp.py):
+
+Actor Network (same as baseline):
+- Feature extractor + TanhNormal policy for continuous hedge ratios
+
+Inactor Network (new):
+- Feature Extractor: 2-layer MLP
+  Linear(feat_dim → hidden_dim) → ReLU → Linear(hidden_dim → hidden_dim) → ReLU
+- Policy Head: Linear(hidden_dim → 1) → Bernoulli distribution
+  Outputs inact ∈ {0, 1} (inaction flag)
+- Value Head: Linear(hidden_dim → hidden_dim/2) → Tanh → Linear(hidden_dim/2 → 1) → Flatten
+
+RNN Variant (actor_inactor_rnn.py):
+- Both actor and inactor use 2-layer LSTMs as feature extractors
+- For exotic options with multiple actions: uses MultiBernoulli (independent Bernoulli 
+  per action dimension)
+
+
+3. JOINT POLICY EXECUTION (joint_policy.py)
+--------------------------------------------------------------------------------
+
+The JointPolicy class combines both networks at inference:
+
+    final_action = where(inact > 0.5, prev_action, actor_action)
+
+- If inact = 1: Keep previous position (no trade)
+- If inact = 0: Execute the actor's proposed hedge ratio
+- Maintains a buffer of previous actions for position persistence
+
+
+================================================================================
+HYPERPARAMETERS
+================================================================================
+
+ENVIRONMENT CONFIGURATION (EnvConfig)
+--------------------------------------------------------------------------------
+Parameter               | Value                 | Description
+------------------------|----------------------|--------------------------------
+maturity                | 1.0 year             | Option time to expiration
+r                       | 0.01                 | Risk-free rate
+num_paths               | 100 (BSM), 20 (Heston)| Parallel simulation paths
+num_steps               | 250                  | Trading days per year
+history_len             | 1 (MLP), 5 (RNN)     | Observation window
+transaction_cost        | True                 | Transaction costs enabled
+transaction_fee_rate    | 0.001 (0.1%)         | Per-trade cost rate
+trap                    | 1                    | Heston integrator scheme
+
+
+PPO CONFIGURATION (PPOConfig)
+--------------------------------------------------------------------------------
+Parameter               | Value                 | Description
+------------------------|----------------------|--------------------------------
+clip_param              | 0.2                  | PPO clipping epsilon
+value_coef              | 0.1                  | Value loss coefficient
+entropy_coeff           | 0.001                | Entropy bonus for exploration
+gamma                   | 0.99                 | Discount factor
+lmbda                   | 0.95                 | GAE lambda
+learning_rate           | 5e-5                 | Initial learning rate (actor training)
+learning_rate_ex        | 5e-6                 | Learning rate for inactor training (10x smaller)
+
+
+TRAINING CONFIGURATION (TrainingConfig)
+--------------------------------------------------------------------------------
+Parameter               | Value                 | Description
+------------------------|----------------------|--------------------------------
+num_epochs              | 30                   | Baseline training epochs
+policy_epochs           | 20                   | Actor pre-training epochs
+inaction_epochs         | 10                   | Inactor training epochs
+num_episodes            | 200                  | Episodes per epoch
+sub_batch_num           | 16                   | PPO mini-batch splits
+hidden_size             | 128 (full) / ~90 (decoupled) | Hidden dimension
+
+Note on hidden size: For decoupled architecture, hidden_dim = int(128 / √2) ≈ 90 
+to maintain similar total parameter count.
+
+
+================================================================================
+FEATURE DIMENSIONS BY OPTION TYPE
+================================================================================
+
+Option Type             | Feature Dim | Action Dim | Description
+------------------------|-------------|------------|---------------------------
+Vanilla Call            | 11          | 1          | Stock + options on single underlying
+Down-and-Out Call (DOC) | 17          | 2          | Barrier monitoring features
+Cash-or-Nothing (CON)   | 17          | 2          | Digital payoff features
+
+
+================================================================================
+TRAINING PROTOCOL
+================================================================================
+
+BASELINE TRAINING (action_training)
+--------------------------------------------------------------------------------
+1. Standard PPO with GAE advantage estimation
+2. Cosine annealing learning rate schedule
+3. Gradient clipping (max_norm=1.0)
+4. NaN gradient protection
+
+
+DECOUPLED TRAINING (Two-Phase)
+--------------------------------------------------------------------------------
+
+Phase 1: Actor Pre-training (20 epochs)
+- Train actor network alone using standard PPO
+- Inactor network is frozen
+
+Phase 2: Joint Actor-Inactor Training (10 epochs)
+- Train both networks simultaneously
+- Inactor updated every episode
+- Actor updated every 3rd episode (slower updates)
+- Separate optimizers with cosine annealing
+- Lower learning rate for stability (5e-6 vs 5e-5)
+
+
+================================================================================
+MARKET MODELS
+================================================================================
+
+BLACK-SCHOLES MODEL
+--------------------------------------------------------------------------------
+- Data source: S&P 500 data from 2017-2021 (bsm_data_2017_2021_sp500.json)
+- Parameters calibrated per year: S0, K, sigma (volatility)
+
+HESTON STOCHASTIC VOLATILITY MODEL
+--------------------------------------------------------------------------------
+- Data source: CMA-ES calibrated parameters (heston_params_CMA.json)
+- Parameters: kappa (mean reversion), theta (long-term variance), 
+  rho (correlation), xi (vol-of-vol), v0 (initial variance)
+- Fewer paths (20 vs 100) due to computational cost
+
+EXOTIC OPTIONS
+--------------------------------------------------------------------------------
+- DOC Barrier: H = 0.9 × K (90% of strike price)
+- Cash-or-Nothing: Fixed digital payoff structure
+
+
+================================================================================
+COMPUTATIONAL RESOURCES
+================================================================================
+
+Platform: Queen Mary University of London HPC (Apocrita cluster)
+
+Typical Job Configuration:
+- 1 CPU core
+- 2GB RAM per core
+- Up to 240 hours runtime
+
+GPU Support: CUDA-enabled (experiments check for GPU availability)
+Tracking: Weights & Biases (wandb) for experiment logging
+
+
+================================================================================
+ABLATION STRUCTURE SUMMARY
+================================================================================
+
+Ablation Axis           | Variants              | Purpose
+------------------------|----------------------|--------------------------------
+Architecture            | Single vs. Decoupled | Core contribution: Does separating 
+                        |                      | action/inaction improve performance?
+Temporal Processing     | MLP vs. RNN          | Does historical context (LSTM) help?
+Option Complexity       | Call / DOC / CON     | Generalization across option types
+Market Dynamics         | BSM vs. Heston       | Robustness to model misspecification
+
+
+================================================================================
+KEY METRICS LOGGED TO WANDB
+================================================================================
+
+Training Metrics:
+- loss_total, loss_critic, loss_objective, loss_entropy
+- avg_reward per episode
+- Learning rate schedules
+
+Decoupled-Specific Metrics:
+- actor_loss_* (when updated)
+- inactor_loss_* (every episode)
+
+Final Test Metrics:
+- final/mean_reward
+- final/std_reward
+
+
+================================================================================
+FILE STRUCTURE OF EXPERIMENTS (24 files in simulations/)
+================================================================================
+
+Baseline experiments (12 files):
+- {bsm,heston}_hedge_{call,con,doc}_{mlp,rnn}.py
+
+Decoupled experiments (12 files, prefixed with inactive_):
+- inactive_{bsm,heston}_hedge_{call,con,doc}_{mlp,rnn}.py
+
+Each experiment accepts a --seed argument for reproducibility across the 10 runs.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

@@ -150,6 +150,7 @@ def actor_inactor_training(
     device,
     action_dim,
     log_interval=10,
+    initial_lr=None,
 ):
     episode_logs = []
     global_episode_idx = 0
@@ -164,6 +165,14 @@ def actor_inactor_training(
         action_dim,
         device,
     )
+
+    # Reset optimizer learning rates before creating new schedulers
+    # This is important when reusing optimizers from a previous training phase
+    if initial_lr is not None:
+        for param_group in optim_actor.param_groups:
+            param_group['lr'] = initial_lr
+        for param_group in optim_inactor.param_groups:
+            param_group['lr'] = initial_lr
 
     actor_scheduler = CosineAnnealingLR(
         optim_actor,

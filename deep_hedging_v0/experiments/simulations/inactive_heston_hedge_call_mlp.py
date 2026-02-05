@@ -179,6 +179,7 @@ def main():
                     sub_batch_size=sub_batch_size,
                     device=device,
                     action_dim=action_dim,
+                    initial_lr=ppo_cfg.learning_rate_ex,
                 )
     # Test
 
