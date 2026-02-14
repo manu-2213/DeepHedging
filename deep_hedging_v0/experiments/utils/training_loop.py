@@ -38,7 +38,7 @@ def action_training(env,
     scheduler = CosineAnnealingLR(
         optim,
         T_max=max(1, num_epochs),
-        eta_min=0.0,
+        eta_min=optim.param_groups[0]['lr']/2, # lr of 0 for PPO causes optimal policy drift
     )
 
     for epoch in range(num_epochs):
@@ -177,12 +177,12 @@ def actor_inactor_training(
     actor_scheduler = CosineAnnealingLR(
         optim_actor,
         T_max=max(1, num_epochs),
-        eta_min=0.0,
+        eta_min=optim_actor.param_groups[0]['lr']/2,
     )
     inactor_scheduler = CosineAnnealingLR(
         optim_inactor,
         T_max=max(1, num_epochs),
-        eta_min=0.0,
+        eta_min=optim_inactor.param_groups[0]['lr']/2,
     )
 
     for epoch in range(num_epochs):

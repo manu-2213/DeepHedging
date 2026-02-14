@@ -37,7 +37,7 @@ class PPOConfig:
     entropy_coeff: float = 0.001
     gamma: float = 0.99
     lmbda: float = 0.95
-    learning_rate: float = 5e-5
+    learning_rate: float = 8e-5 # -> 4e-5
     learning_rate_ex: float = 5e-6
 
 
