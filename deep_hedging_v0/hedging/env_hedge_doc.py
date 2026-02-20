@@ -99,8 +99,8 @@ class HedgeDoc(HedgeBase):
         # Calculate and apply transaction costs if enabled
         if self.transaction_cost:
             # Calculate transaction costs
-            call_transaction_costs = np.abs(call_trade_value) * self.transaction_fee_rate
-            put_transaction_costs = np.abs(put_trade_value) * self.transaction_fee_rate
+            call_transaction_costs = np.abs(call_trade_value) * self.transaction_fee_rate * 5
+            put_transaction_costs = np.abs(put_trade_value) * self.transaction_fee_rate * 5
             
             # Subtract trading costs from cash account
             self.cash_account[:, :, :, self.current_step] -= (
