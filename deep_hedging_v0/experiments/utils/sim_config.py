@@ -32,12 +32,12 @@ class EnvConfig:
 
 @dataclass
 class PPOConfig:
-    clip_param: float = 0.2
+    clip_param: float = 0.1
     value_coef: float = 0.1
     entropy_coeff: float = 0.001
     gamma: float = 0.99
     lmbda: float = 0.95
-    learning_rate: float = 8e-5 # -> 4e-5
+    learning_rate: float = 1e-5 # -> 5e-6
     learning_rate_ex: float = 5e-6
 
 

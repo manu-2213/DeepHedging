@@ -56,7 +56,7 @@ def create_ppo_rnn_actor(input_dim, action_dim, hidden_dim=64, num_layers=2):
         module=policy_network,
         in_keys=["loc", "scale"],
         out_keys=["action"],
-        distribution_class=LogitNormal,
+        distribution_class=TanhNormal,
         return_log_prob=True,
     )
 

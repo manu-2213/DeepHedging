@@ -64,11 +64,9 @@ base_env = HedgeCallHeston(
 
 env = GymWrapper(base_env)
 
-# For small batch sizes, CPU is faster due to GPU transfer overhead
-# Only use GPU if batch is large enough to amortize transfer costs
-frames_per_batch = env.num_envs * num_steps
-USE_GPU_THRESHOLD = 5000  # Only use GPU if batch > this size
-if frames_per_batch >= USE_GPU_THRESHOLD and torch.cuda.is_available():
+frames_per_batch = env.num_envs * num_steps 
+if torch.cuda.is_available():
+    print("Using the GPU")
     device = torch.device("cuda")
 else:
     device = torch.device("cpu")
