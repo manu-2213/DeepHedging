@@ -10,7 +10,7 @@ from experiments.utils.ppo_mlp_actor import create_ppo_mlp_actor
 from experiments.utils.training_loop import action_training
 from experiments.utils.testing import test_model
 from experiments.utils.sim_config import (
-    load_heston_data,
+    train_test_split,
     EnvConfig,
     PPOConfig,
     TrainingConfig,
@@ -36,7 +36,8 @@ from torchrl.envs import GymWrapper
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-params, S0, K, v0 = load_heston_data()
+train, test = train_test_split(dynamics="heston", train_size=4, market="sp500")
+params, S0, K, v0 = train
 H = compute_barriers(K)
 
 env_cfg = EnvConfig()
@@ -120,7 +121,8 @@ model = action_training(env,
                         sub_batch_size,
                         )
 # Test
-
+params, S0, K, v0 = test
+H = compute_barriers(K)
 base_env = HedgeDocHeston(
     S0=S0, K = K, H=H, r=r, v0=v0, theta=params["theta"], rho=params["rho"],
     kappa=params["kappa"], xi=params["sigma"], maturity=maturity,

@@ -32,7 +32,7 @@ from experiments.utils.sim_config import (
     EnvConfig,
     PPOConfig,
     TrainingConfig,
-    load_heston_data,
+    train_test_split,
     compute_barriers,
 )
 
@@ -52,7 +52,8 @@ def main():
     ppo_cfg = PPOConfig()
     trn_cfg = TrainingConfig()
 
-    params, S0, K, v0 = load_heston_data()
+    train, test = train_test_split(dynamics="heston", train_size=4, market="sp500")
+    params, S0, K, v0 = train
     H = compute_barriers(K)
     maturity = env_cfg.maturity
     r = env_cfg.r
@@ -182,6 +183,8 @@ def main():
 
     action_model, inaction_model = train_stats["action_model"], train_stats["inaction_model"]
 
+    params, S0, K, v0 = test
+    H = compute_barriers(K)
     base_env = HedgeDocHeston(
         S0=S0, K=K, H=H, r=r, v0=v0, theta=params["theta"], rho=params["rho"],
         kappa=params["kappa"], xi=params["sigma"], maturity=maturity,

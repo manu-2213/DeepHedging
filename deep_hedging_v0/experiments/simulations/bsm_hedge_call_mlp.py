@@ -29,7 +29,7 @@ from experiments.utils.sim_config import (
     EnvConfig,
     PPOConfig,
     TrainingConfig,
-    load_bsm_data,
+    train_test_split,
 )
 
 from torchrl.envs import GymWrapper
@@ -46,9 +46,9 @@ def main():
 
     seed = args.seed
     torch.manual_seed(seed)
-    np.random.seed(seed)
 
-    S0, K, sigma = load_bsm_data()
+    train, test = train_test_split(dynamics="bsm", train_size=4, market="sp500")
+    S0, K, sigma = train
     env_cfg = EnvConfig()
     train_cfg = TrainingConfig()
     maturity = env_cfg.maturity
@@ -127,9 +127,11 @@ def main():
         log_frquency=1,  
     )
 
+    S0, K, sigma = test
+
     test_env = HedgeCallBS(S0, K, maturity, r, sigma, num_paths, num_steps, history_len=history_len,
                            transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate)
-    test_model(test_env, model, num_steps, device, plotting=False)
+    test_model(test_env, model, num_steps, device, plotting=True)
 
     # Close the W&B run cleanly
     wandb.finish()

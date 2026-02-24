@@ -33,7 +33,7 @@ from experiments.utils.sim_config import (
     PPOConfig,
     TrainingConfig,
     DEFAULT_WANDB_PROJECT,
-    load_bsm_data,
+    train_test_split,
     default_barriers,
     training_to_wandb_config,
 )
@@ -51,9 +51,9 @@ def main():
 
     seed = args.seed
     torch.manual_seed(seed)
-    np.random.seed(seed)
 
-    S0, K, sigma = load_bsm_data()
+    train, test = train_test_split(dynamics="bsm", train_size=4, market="sp500")
+    S0, K, sigma = train
     H = default_barriers(K)
     env_cfg = EnvConfig()
     train_cfg = TrainingConfig()
@@ -133,6 +133,8 @@ def main():
     )
 
     # 5. Optional: run test and log some test metric if you want
+    S0, K, sigma = test
+    H = default_barriers(K)
     test_env = HedgeDocBS(S0, K, H, maturity, r, sigma, num_paths, num_steps, history_len=history_len,
                     transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate)
     test_model(test_env, model, num_steps, device, plotting=False)

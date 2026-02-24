@@ -33,7 +33,7 @@ from experiments.utils.sim_config import (
     PPOConfig,
     TrainingConfig,
     DEFAULT_WANDB_PROJECT,
-    load_bsm_data,
+    train_test_split,
     default_concentration_matrix,
     training_to_wandb_config,
 )
@@ -51,9 +51,9 @@ def main():
 
     seed = args.seed
     torch.manual_seed(seed)
-    np.random.seed(seed)
 
-    S0, K, sigma = load_bsm_data()
+    train, test = train_test_split(dynamics="bsm", train_size=4, market="sp500")
+    S0, K, sigma = train
 
     maturity = 1.0
     r = 0.01
@@ -130,6 +130,7 @@ def main():
     )
 
     # 5. Optional: run test and log some test metric if you want
+    S0, K, sigma = test
     test_env = HedgeConcBS(S0, K, P, maturity, r, sigma, num_paths, num_steps, history_len=history_len,
                         transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate)
     test_model(test_env, model, num_steps, device, plotting=False)

@@ -32,7 +32,7 @@ from experiments.utils.sim_config import (
     EnvConfig,
     PPOConfig,
     TrainingConfig,
-    load_bsm_data,
+    train_test_split,
     default_barriers,
 )
 
@@ -52,7 +52,8 @@ def main():
     ppo_cfg = PPOConfig()
     trn_cfg = TrainingConfig()
 
-    S0, K, sigma = load_bsm_data()
+    train, test = train_test_split(dynamics="bsm", train_size=4, market="sp500")
+    S0, K, sigma = train
     H = default_barriers(K)
     maturity = env_cfg.maturity
     r = env_cfg.r
@@ -182,6 +183,8 @@ def main():
 
     action_model, inaction_model = train_stats["action_model"], train_stats["inaction_model"]
 
+    S0, K, sigma = test
+    H = default_barriers(K)
     base_env = HedgeDocBS(
         S0, K, H, maturity, r, sigma, num_paths, num_steps,
         history_len=history_len,
