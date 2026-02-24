@@ -10,8 +10,8 @@ import numpy as np
 from experiments.utils.data import convert_data, compute_barriers, convert_data_heston
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH_BSM = PROJECT_ROOT / "experiments" / "option_parameter_estimation" / "bsm_data_2017_2021_sp500.json"
-DATA_PATH_HESTON = PROJECT_ROOT / "experiments" / "option_parameter_estimation" / "heston_params_CMA.json"
+DATA_PATH_BSM = PROJECT_ROOT / "experiments" / "option_parameter_estimation"
+DATA_PATH_HESTON = PROJECT_ROOT / "experiments" / "option_parameter_estimation"
 DEFAULT_WANDB_PROJECT = "deephedging_local_test"
 
 
@@ -51,14 +51,16 @@ class TrainingConfig:
     hidden_size: int = 128
 
 
-def load_bsm_data(path: Path | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_bsm_data(market: str, path: Path | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Loads S0, K, sigma arrays used across the BSM experiments."""
+    DATA_PATH_BSM = DATA_PATH_BSM / f"bsm_data_{market}_2017_2021.json"
     with open(path or DATA_PATH_BSM, "r", encoding="utf-8") as file:
         data = json.load(file)
     return convert_data(data)
 
-def load_heston_data(path: Path | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_heston_data(market: str, path: Path | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Loads S0, K, sigma arrays used across the BSM experiments."""
+    DATA_PATH_HESTON = DATA_PATH_HESTON / f"heston_params_QL_v2_{market}.json"
     with open(path or DATA_PATH_HESTON, "r", encoding="utf-8") as file:
         data = json.load(file)
     return convert_data_heston(data)
