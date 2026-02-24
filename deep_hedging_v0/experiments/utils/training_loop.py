@@ -43,8 +43,6 @@ def action_training(env,
 
     for epoch in range(num_epochs):
         # Prepare for a new epoch: force full reset by disabling soft reset
-        # and setting a new seed. The collector will do the actual reset.
-        epoch_seed = epoch if seed is None else seed + epoch
         # Access base env through GymWrapper
         base_env = env._env if hasattr(env, '_env') else env
         # Disable soft reset so collector's reset triggers full path regeneration

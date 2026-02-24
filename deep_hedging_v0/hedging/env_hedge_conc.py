@@ -52,9 +52,12 @@ class HedgeConc(HedgeBase):
 
     def post_reset(self):
         self.stock_prices = self.simulator.paths
-        self.option_prices = self.simulator.cash_or_nothing_call(self.K, self.P)  # CoN prices
-        self.call_prices = self.simulator.euro_call(self.K)
-        self.put_prices = self.simulator.euro_put(self.K)
+        # Only reprice options on a full reset (new paths).
+        # Soft resets (torchRL auto-resets between episodes) reuse cached prices.
+        if not getattr(self, '_is_soft_reset', False):
+            self.option_prices = self.simulator.cash_or_nothing_call(self.K, self.P)  # CoN prices
+            self.call_prices = self.simulator.euro_call(self.K)
+            self.put_prices = self.simulator.euro_put(self.K)
         self.current_step = 0
         # Reset portfolio and cash account
         self.reset_portfolio()

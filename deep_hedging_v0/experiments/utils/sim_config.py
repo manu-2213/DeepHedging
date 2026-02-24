@@ -50,18 +50,50 @@ class TrainingConfig:
     sub_batch_num: int = 16
     hidden_size: int = 128
 
+def train_test_split(dynamics: str, train_size: int, market: str):
+    if dynamics == "heston":
+        params, S0, K, v0 = load_heston_data(market=market)
+        params_train = {}
+        params_test = {}
+        for key, value in params.items():
+            params_train[key] = value[:train_size]
+            params_test[key] = value[train_size:]
+    elif dynamics == "bsm":
+        S0, K, v0 = load_bsm_data(market=market)
+    else:
+        raise ValueError("Dynamics must be either 'heston' or 'bsm' as of v0")
+    
+    S0_train = S0[:train_size]
+    S0_test = S0[train_size:]
+
+    K_train = K[:train_size]
+    K_test = K[train_size:]
+
+    v0_train = v0[:train_size]
+    v0_test = v0[train_size:]
+
+    if dynamics == "heston":
+        train = (params_train, S0_train, K_train, v0_train)
+        test = (params_test, S0_test, K_test, v0_test)
+        
+    elif dynamics == "bsm":
+        train = (S0_train, K_train, v0_train)
+        test = (S0_test, K_test, v0_test)
+
+    return train, test
+
 
 def load_bsm_data(market: str, path: Path | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Loads S0, K, sigma arrays used across the BSM experiments."""
-    DATA_PATH_BSM = DATA_PATH_BSM / f"bsm_data_{market}_2017_2021.json"
-    with open(path or DATA_PATH_BSM, "r", encoding="utf-8") as file:
+    DATA_PATH = DATA_PATH_BSM / f"bsm_data_{market}_2017_2021.json"
+    with open(path or DATA_PATH, "r", encoding="utf-8") as file:
         data = json.load(file)
     return convert_data(data)
 
 def load_heston_data(market: str, path: Path | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Loads S0, K, sigma arrays used across the BSM experiments."""
-    DATA_PATH_HESTON = DATA_PATH_HESTON / f"heston_params_QL_v2_{market}.json"
-    with open(path or DATA_PATH_HESTON, "r", encoding="utf-8") as file:
+    DATA_PATH = DATA_PATH_HESTON / f"heston_params_QL_v2_{market}.json"
+    with open(path or DATA_PATH, "r", encoding="utf-8") as file:
         data = json.load(file)
     return convert_data_heston(data)
 
