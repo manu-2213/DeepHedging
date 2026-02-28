@@ -112,7 +112,7 @@ def main():
     num_epochs = train_cfg.num_epochs
     num_episodes = train_cfg.num_episodes
 
-    model = action_training(
+    model, _ = action_training(
         env,
         model,
         num_epochs,

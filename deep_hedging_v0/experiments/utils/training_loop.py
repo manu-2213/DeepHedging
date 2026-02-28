@@ -20,6 +20,7 @@ def action_training(env,
                     sub_batch_num,
                     sub_batch_size,
                     log_frquency=10,
+                    scheduler=None,
                     seed=None):
     
     # keep full reward curve for this run
@@ -35,11 +36,12 @@ def action_training(env,
     advantage_module.set_keys(value=value_key)
     loss_module.set_keys(value=value_key)
 
-    scheduler = CosineAnnealingLR(
-        optim,
-        T_max=max(1, num_epochs),
-        eta_min=optim.param_groups[0]['lr']/2, # lr of 0 for PPO causes optimal policy drift
-    )
+    if scheduler is None:
+        scheduler = CosineAnnealingLR(
+            optim,
+            T_max=max(1, num_epochs),
+            eta_min=optim.param_groups[0]['lr']/2, # lr of 0 for PPO causes optimal policy drift
+        )
 
     for epoch in range(num_epochs):
         # Prepare for a new epoch: force full reset by disabling soft reset
@@ -128,7 +130,7 @@ def action_training(env,
         scheduler.step()
         wandb.log({"learning_rate": scheduler.get_last_lr()[0]}, commit=False)
 
-    return model
+    return model, scheduler
 
 def actor_inactor_training(
     env,
@@ -149,6 +151,7 @@ def actor_inactor_training(
     action_dim,
     log_interval=10,
     initial_lr=None,
+    actor_scheduler=None,
 ):
     episode_logs = []
     global_episode_idx = 0
@@ -164,19 +167,20 @@ def actor_inactor_training(
         device,
     )
 
-    # Reset optimizer learning rates before creating new schedulers
-    # This is important when reusing optimizers from a previous training phase
+    # Reset inactor LR; only reset actor LR if no external scheduler is provided
     if initial_lr is not None:
-        for param_group in optim_actor.param_groups:
-            param_group['lr'] = initial_lr
+        if actor_scheduler is None:
+            for param_group in optim_actor.param_groups:
+                param_group['lr'] = initial_lr
         for param_group in optim_inactor.param_groups:
             param_group['lr'] = initial_lr
 
-    actor_scheduler = CosineAnnealingLR(
-        optim_actor,
-        T_max=max(1, num_epochs),
-        eta_min=optim_actor.param_groups[0]['lr']/2,
-    )
+    if actor_scheduler is None:
+        actor_scheduler = CosineAnnealingLR(
+            optim_actor,
+            T_max=max(1, num_epochs),
+            eta_min=optim_actor.param_groups[0]['lr']/2,
+        )
     inactor_scheduler = CosineAnnealingLR(
         optim_inactor,
         T_max=max(1, num_epochs),

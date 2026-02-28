@@ -108,7 +108,7 @@ optim = torch.optim.Adam(loss_module.parameters(),lr=ppo_cfg.learning_rate)
 num_epochs = train_cfg.num_epochs
 num_episodes = train_cfg.num_episodes
 
-model = action_training(env, 
+model, _ = action_training(env, 
                         model,  
                         num_epochs,
                         num_episodes, 

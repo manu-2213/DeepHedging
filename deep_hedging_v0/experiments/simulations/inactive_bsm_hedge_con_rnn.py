@@ -40,6 +40,7 @@ from experiments.utils.sim_config import (
 from torchrl.envs import GymWrapper
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 def main():
     wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
@@ -137,11 +138,16 @@ def main():
     num_episodes = trn_cfg.num_episodes
     policy_epochs = trn_cfg.policy_epochs
     inaction_epochs = trn_cfg.inaction_epochs
+    actor_scheduler = CosineAnnealingLR(
+        optim_actor,
+        T_max=max(1, policy_epochs + inaction_epochs),
+        eta_min=lr / 2,
+    )
     frames_per_batch = env.num_envs * num_steps
     sub_batch_num = trn_cfg.sub_batch_num
     sub_batch_size = frames_per_batch // sub_batch_num
 
-    action_model = action_training(env, 
+    action_model, actor_scheduler = action_training(env, 
                     action_model,  
                     policy_epochs,
                     num_episodes, 
@@ -153,6 +159,7 @@ def main():
                     sub_batch_num,
                     sub_batch_size,
                     1,
+                    scheduler=actor_scheduler,
                     )
 
     train_stats = actor_inactor_training(
@@ -173,6 +180,7 @@ def main():
                     device=device,
                     action_dim=action_dim,
                     initial_lr=ppo_cfg.learning_rate_ex,
+                    actor_scheduler=actor_scheduler,
                 )
     # Test
 

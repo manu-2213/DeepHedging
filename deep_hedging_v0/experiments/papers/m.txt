@@ -1,0 +1,137 @@
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Problem Formulation}
+
+Consider a portfolio $V_t$ replicating a European-style option with maturity $T$ and model price $C_t$.  Trading occurs at discrete times $t_0 < \cdots < t_N = T$ with uniform step $\Delta t = T/N$, $N = 250$.  Let $\pi_t \in [-1,1]^d$ denote the signed share position held over $(t, t+1]$, where $d \in \{1,2\}$ depends on the contract (Section~\ref{sec:options}).
+
+\paragraph{Portfolio dynamics.}
+At each step the trader rebalances from $\pi_{t-1}$ to $\pi_t$.  Let $B_t$ denote the cash account; the portfolio value is $V_t = B_t + \pi_{t-1}^\top S_t$.  After execution:
+\begin{align}
+B_t &\leftarrow B_t - \Delta\pi_t^\top S_t - \lambda \|\Delta\pi_t \odot S_t\|_1, \label{eq:cash} \\
+B_{t+1} &= B_t \, e^{r\Delta t}, \\
+V_{t+1} &= B_{t+1} + \pi_t^\top S_{t+1},
+\end{align}
+where $\Delta\pi_t = \pi_t - \pi_{t-1}$, $\lambda = 10^{-3}$ is the proportional transaction cost rate, and $r = 0.01$.  The portfolio is initialised with the option premium: $B_0 = C_0$.
+
+\paragraph{Reward.}
+The per-step reward is the instantaneous replication error against the model price:
+\begin{equation}
+r_t = -\lvert V_{t+1} - C_{t+1} \rvert.
+\label{eq:reward}
+\end{equation}
+The agent maximises the discounted sum $\sum_{t=0}^{N-1} \gamma^t r_t$, $\gamma = 0.99$.  At evaluation the signed terminal P\&L $\mathrm{PnL} = V_N - C_N$ is used (Section~\ref{sec:metrics}).
+
+\subsection{Market Dynamics}
+
+\paragraph{Black--Scholes (BSM).}
+$dS_t = r S_t\,dt + \sigma S_t\,dW_t$.
+Paths are simulated via the exact discretisation:
+\begin{equation}
+S_{t+1} = S_t \exp\!\Bigl((r - \tfrac{1}{2}\sigma^2)\Delta t
+  + \sigma\sqrt{\Delta t}\,Z_t\Bigr),\quad
+Z_t \overset{\text{iid}}{\sim} \mathcal{N}(0,1).
+\end{equation}
+
+\paragraph{Heston stochastic volatility.}
+\begin{align}
+dS_t &= r S_t\,dt + \sqrt{v_t}\,S_t\,dW^S_t, \label{eq:heston_s}\\
+dv_t &= \kappa(\theta - v_t)\,dt + \xi\sqrt{v_t}\,dW^v_t, \label{eq:heston_v}\\
+d\langle W^S,\,W^v\rangle_t &= \rho\,dt,
+\end{align}
+with $v_t$ floored at zero (Euler--Maruyama with absorption).  Correlated increments are constructed as
+\[
+dW^v_t = \rho\,dW^S_t + \sqrt{1-\rho^2}\,dW^\perp_t.
+\]
+All $N$ steps are rolled out in a single compiled \texttt{jax.lax.scan} pass.
+
+\subsection{Options}
+\label{sec:options}
+
+All contracts use $r = 0.01$, $T = 1$, and $\lambda = 10^{-3}$.  The down-and-out barrier is $H = 0.9 K$.
+
+\begin{description}[leftmargin=0pt]
+\item[European call.] Payoff $(S_T - K)^+$; action dimension $d=1$.
+\item[Down-and-out call (DoC).] Payoff $(S_T - K)^+\mathbf{1}_{\tau_H > T}$, where $\tau_H = \inf\{t : S_t \le H\}$; hedged with a vanilla call and a put struck at $H^2/K$, so $d=2$.
+\item[Cash-or-nothing digital (CoN).] Payoff $\mathbf{1}_{S_T > K}$; hedged with a vanilla call and a put struck at $K$, so $d=2$.
+\end{description}
+
+Model prices $C_t$ are computed along each simulated path: analytically (BSM formula for calls; Heston characteristic-function integral for calls and digitals) or via nested Monte Carlo with $5{,}000$ inner paths (down-and-out under Heston).  Prices are cached once per epoch; between-episode resets reuse the cache.
+
+\subsection{Observation Space}
+
+The \emph{base feature vector} for all contracts is $\phi_t \in \mathbb{R}^{11}$:
+\begin{equation}
+\phi_t =
+\begin{pmatrix}
+  \Delta S_t,\; S_t/S_{t-1},\; \log(S_t/S_{t-1}) \\
+  \Delta C_t,\; C_t/C_{t-1},\; \log(C_t/C_{t-1}) \\
+  \hat\delta_t,\; K/S_t,\; \log(K/S_t),\; \tau_t,\; r
+\end{pmatrix},
+\label{eq:features}
+\end{equation}
+where $\tau_t = T - t\Delta t$ and $\hat\delta_t = \Delta C_t/(\Delta S_t + \varepsilon)$ clipped to $[0,1]$ is a model-free delta estimate ($\varepsilon = 10^{-8}$).  Differences and ratios at $t=0$ are initialised to $0$ and $1$ respectively.
+
+For exotic contracts, six additional features record the first-difference, ratio, and log-ratio of each of the two hedging instruments ($V^{(1)}_t$, $V^{(2)}_t$), extending the vector to $\mathbb{R}^{17}$.  For recurrent policies, the last $L=5$ feature vectors are stacked to form the observation $(\phi_{t-L+1},\ldots,\phi_t)$.
+
+\subsection{Actor--Inactor Architecture}
+
+\paragraph{Motivation.}
+Transaction costs induce a no-trade region: the optimal policy is to hold the current position unless the rebalancing gain exceeds frictional costs~\citep{magill1976,davis1993}.  We operationalise this impulse-control structure through two separate networks—an \emph{actor} that proposes a new position and an \emph{inactor} that decides whether to trade.
+
+\paragraph{Actor $\pi_\theta$.}
+A two-layer MLP with Tanh nonlinearities and hidden width $h=\lfloor 128/\!\sqrt{2}\rfloor = 90$:
+\begin{align*}
+&f_\theta(s_t) \in \mathbb{R}^h,\quad
+(\mu_t, \sigma_t) = W_\mathrm{out}\,f_\theta(s_t), \\
+&a_t \sim \mathrm{TanhNormal}(\mu_t, \sigma_t),\quad a_t\in[-1,1]^d.
+\end{align*}
+The critic shares $f_\theta$ and maps to $\hat V^\pi(s_t)$ via a head of widths $h \to 8 \to 1$ (Tanh).
+
+\paragraph{Inactor $\psi$.}
+A two-layer MLP with ReLU activations and the same hidden width $h$:
+\begin{align*}
+&g_\psi(s_t) \in \mathbb{R}^h,\quad
+\ell_t = w^\top g_\psi(s_t), \\
+&b_t \sim \mathrm{Bernoulli}(\sigma(\ell_t)),\quad b_t\in\{0,1\}.
+\end{align*}
+The inactor critic maps $g_\psi(s_t)$ to $\hat V^\psi(s_t)$ via a head of width $h/2$.
+
+\paragraph{Joint action.}
+\begin{equation}
+\pi_t = (1 - b_t)\,a_t + b_t\,\pi_{t-1}.
+\label{eq:joint}
+\end{equation}
+$b_t = 1$ holds the previous position (zero transaction cost); $b_t = 0$ executes the actor's proposal.  The original proposal $a_t$ is retained in the tensordict for the actor's PPO gradient, decoupling inactor decisions from actor credit assignment.
+
+\paragraph{RNN variant.}
+Both $f_\theta$ and $g_\psi$ are replaced by single-layer LSTMs of hidden width $h$, operating on the observation window of length $L=5$.
+
+\paragraph{Baseline.}
+The single-policy baseline uses only the actor (MLP or LSTM) with no inaction component.
+
+\subsection{Training}
+
+\paragraph{PPO.}
+Both actor and inactor are trained with clipped PPO~\citep{schulman2017ppo}:
+\begin{equation}
+\mathcal{L}^{\mathrm{PPO}}(\theta) =
+\mathbb{E}_t\!\Bigl[
+\min\!\bigl(
+\rho_t(\theta)\,\hat{A}_t,\;
+\mathrm{clip}(\rho_t(\theta),\,1\!-\!\epsilon,\,1\!+\!\epsilon)\,\hat{A}_t
+\bigr)
+\Bigr],
+\label{eq:ppo}
+\end{equation}
+where $\rho_t(\theta) = \pi_\theta(a_t|s_t)/\pi_{\theta_\mathrm{old}}(a_t|s_t)$, $\hat A_t$ is the GAE$(\gamma,\lambda_{\mathrm{GAE}})$ advantage with $\lambda_{\mathrm{GAE}} = 0.95$, and $\epsilon = 0.1$.  Full loss: $\mathcal{L} = \mathcal{L}^{\mathrm{PPO}} - 0.1\,\mathcal{L}^V + 10^{-3}\,\mathcal{H}$, where $\mathcal{L}^V$ is the value-function MSE and $\mathcal{H}$ is the policy entropy.
+
+\paragraph{Optimiser.}
+Adam~\citep{kingma2015adam} with $\eta = 10^{-5}$, cosine-annealed to $\eta/2$.  Each epoch collects $F = N_\mathrm{envs} \times N$ frames (one full trajectory for every parallel environment), then performs 16 PPO mini-batch updates of size $F/16$.
+
+\paragraph{Two-stage schedule for Actor--Inactor.}
+\begin{enumerate}
+\item \emph{Actor pre-training} (20 epochs): the actor is trained alone, identical to the baseline.
+\item \emph{Joint training} (10 epochs): actor and inactor share the environment.  The inactor gradient is computed every episode; the actor is updated every third episode to prevent the action distribution from collapsing before the inactor has converged.
+\end{enumerate}
+Total training equals 30 epochs in both architectures.
