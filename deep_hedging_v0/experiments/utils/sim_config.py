@@ -19,9 +19,9 @@ DEFAULT_WANDB_PROJECT = "deephedging_local_test"
 class EnvConfig:
     maturity: float = 1.0
     r: float = 0.01
-    num_paths: int = 10 #100
+    num_paths: int = 100
     num_paths_heston: int = 20 # Very compute heavy
-    num_steps: int = 25 #250
+    num_steps: int = 250
     history_len: int = 1
     history_len_rnn: int = 5
     transaction_cost: bool = True
@@ -48,7 +48,7 @@ class TrainingConfig:
     inaction_epochs: int = 10 
     num_episodes: int = 400
     sub_batch_num: int = 16
-    hidden_size: int = 32 #128
+    hidden_size: int = 128
 
 def train_test_split(dynamics: str, train_size: int, market: str):
     if dynamics == "heston":
