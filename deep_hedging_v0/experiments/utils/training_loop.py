@@ -100,13 +100,18 @@ def action_training(env,
             # average reward in this batch (all paths, all steps)
             avg_reward = batch["next", "reward"].mean().item()
 
-            # Graph 4 – risk metrics: terminal hedging error |portfolio_T - option_T|
-            # Use only the LAST step reward per env (= -|portfolio_T - option_T| at maturity),
-            # NOT the sum over all steps, which would be a cumulative RL return, not a financial metric.
-            _terminal_rewards = batch["next", "reward"].reshape(-1, env.num_envs)[-1, :].cpu().numpy()
-            _terminal_errors = -_terminal_rewards  # positive: |portfolio_T - option_T|
-            _var95  = float(np.percentile(_terminal_errors, 95))
-            _cvar95 = float(_terminal_errors[_terminal_errors >= _var95].mean()) if (_terminal_errors >= _var95).any() else _var95
+            # Graph 4 – risk metrics: per-path total tracking error, normalised to per-step.
+            # sum_t |portfolio_t - option_t| = -sum_t reward_t  (abs_diff reward convention).
+            # Dividing by num_steps gives average absolute hedging error per step per path,
+            # which is at the right financial scale and decreases as the policy improves.
+            # NOTE: base_env arrays are NOT read here because TorchRL's internal autoreset
+            # zeroes portfolio_value before the batch is yielded.
+            _rewards_flat = batch["next", "reward"].flatten()
+            _num_steps  = _rewards_flat.numel() // env.num_envs
+            _ep_returns = _rewards_flat.reshape(_num_steps, env.num_envs).sum(dim=0).cpu().numpy()
+            _tracking   = (-_ep_returns) / max(1, _num_steps)   # avg |error| per step per path
+            _var95  = float(np.percentile(_tracking, 95))
+            _cvar95 = float(_tracking[_tracking >= _var95].mean()) if (_tracking >= _var95).any() else _var95
 
             # after collector loop (one batch), log reward and losses for this episode
             reward_history.append(avg_reward)
@@ -311,13 +316,18 @@ def actor_inactor_training(
             else:
                 inaction_rate = 0.0
 
-            # Graph 4 – risk metrics: terminal hedging error |portfolio_T - option_T|
-            # Use only the LAST step reward per env (= -|portfolio_T - option_T| at maturity),
-            # NOT the sum over all steps, which would be a cumulative RL return, not a financial metric.
-            _terminal_rewards = last_batch["next", "reward"].reshape(-1, env.num_envs)[-1, :].cpu().numpy()
-            _terminal_errors = -_terminal_rewards  # positive: |portfolio_T - option_T|
-            _var95  = float(np.percentile(_terminal_errors, 95))
-            _cvar95 = float(_terminal_errors[_terminal_errors >= _var95].mean()) if (_terminal_errors >= _var95).any() else _var95
+            # Graph 4 – risk metrics: per-path total tracking error, normalised to per-step.
+            # sum_t |portfolio_t - option_t| = -sum_t reward_t  (abs_diff reward convention).
+            # Dividing by num_steps gives average absolute hedging error per step per path,
+            # which is at the right financial scale and decreases as the policy improves.
+            # NOTE: base_env arrays are NOT read here because TorchRL's internal autoreset
+            # zeroes portfolio_value before the batch is yielded.
+            _rewards_flat = last_batch["next", "reward"].flatten()
+            _num_steps  = _rewards_flat.numel() // env.num_envs
+            _ep_returns = _rewards_flat.reshape(_num_steps, env.num_envs).sum(dim=0).cpu().numpy()
+            _tracking   = (-_ep_returns) / max(1, _num_steps)   # avg |error| per step per path
+            _var95  = float(np.percentile(_tracking, 95))
+            _cvar95 = float(_tracking[_tracking >= _var95].mean()) if (_tracking >= _var95).any() else _var95
 
             # Print training progress at regular intervals
             if (episode + 1) % log_interval == 0:
