@@ -340,7 +340,7 @@ def actor_inactor_training(
         inactor_scheduler.step()
         wandb.log(
             {
-                "actor_learning_rate": actor_scheduler.get_last_lr()[0],
+                "learning_rate": actor_scheduler.get_last_lr()[0],
                 "inactor_learning_rate": inactor_scheduler.get_last_lr()[0],
             },
             commit=False,

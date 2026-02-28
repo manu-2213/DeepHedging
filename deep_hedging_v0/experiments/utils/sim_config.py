@@ -37,16 +37,16 @@ class PPOConfig:
     entropy_coeff: float = 0.001
     gamma: float = 0.99
     lmbda: float = 0.95
-    learning_rate: float = 1e-5 # -> 5e-6
+    learning_rate: float = 1e-5 
     learning_rate_ex: float = 5e-6
 
 
 @dataclass
 class TrainingConfig:
     num_epochs: int = 30
-    policy_epochs: int = 20
-    inaction_epochs: int = 10
-    num_episodes: int = 200
+    policy_epochs: int = 20 
+    inaction_epochs: int = 10 
+    num_episodes: int = 400
     sub_batch_num: int = 16
     hidden_size: int = 128
 
