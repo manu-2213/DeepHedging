@@ -100,6 +100,13 @@ def action_training(env,
             # average reward in this batch (all paths, all steps)
             avg_reward = batch["next", "reward"].mean().item()
 
+            # Graph 4 – risk metrics from per-env episode returns
+            # (avoids reading base_env arrays which are cleared by TorchRL's internal reset)
+            _ep_returns = batch["next", "reward"].reshape(-1, env.num_envs).sum(dim=0).cpu().numpy()
+            _losses = -_ep_returns
+            _var95  = float(np.percentile(_losses, 95))
+            _cvar95 = float(_losses[_losses >= _var95].mean()) if (_losses >= _var95).any() else _var95
+
             # after collector loop (one batch), log reward and losses for this episode
             reward_history.append(avg_reward)
 
@@ -113,6 +120,8 @@ def action_training(env,
                     "loss_objective": loss_objective.item(),
                     "loss_entropy": loss_entropy.item(),
                     "avg_reward": avg_reward,
+                    "var_95": _var95,
+                    "cvar_95": _cvar95,
                 }
             )
 
@@ -292,7 +301,21 @@ def actor_inactor_training(
 
             joint_policy.reset()
             avg_reward = last_batch["next", "reward"].mean().item()
-            
+
+            # Graph 1 – inaction rate: fraction of steps where prev action was kept
+            if "original_action" in last_batch.keys():
+                _orig  = last_batch["original_action"].cpu().float()
+                _final = last_batch["action"].cpu().float()
+                inaction_rate = (torch.abs(_orig - _final) > 1e-6).float().mean().item()
+            else:
+                inaction_rate = 0.0
+
+            # Graph 4 – risk metrics from per-env episode returns
+            _ep_returns = last_batch["next", "reward"].reshape(-1, env.num_envs).sum(dim=0).cpu().numpy()
+            _losses = -_ep_returns
+            _var95  = float(np.percentile(_losses, 95))
+            _cvar95 = float(_losses[_losses >= _var95].mean()) if (_losses >= _var95).any() else _var95
+
             # Print training progress at regular intervals
             if (episode + 1) % log_interval == 0:
                 if episode % 3 == 0:
@@ -317,6 +340,9 @@ def actor_inactor_training(
                 "episode": episode,
                 "global_episode": global_episode_idx,
                 "avg_reward": avg_reward,
+                "inaction_rate": inaction_rate,
+                "var_95": _var95,
+                "cvar_95": _cvar95,
                 # Inactor metrics are updated every episode
                 "inactor_loss_total": inact_loss,
                 "inactor_loss_critic": i_loss_critic,
@@ -326,10 +352,10 @@ def actor_inactor_training(
 
             if episode % 3 == 0:
                 log_payload.update({
-                    "actor_loss_total": current_policy_loss,
-                    "actor_loss_critic": a_loss_critic,
-                    "actor_loss_objective": a_loss_objective,
-                    "actor_loss_entropy": a_loss_entropy,
+                    "loss_total": current_policy_loss,
+                    "loss_critic": a_loss_critic,
+                    "loss_objective": a_loss_objective,
+                    "loss_entropy": a_loss_entropy,
                 })
 
             wandb.log(log_payload)

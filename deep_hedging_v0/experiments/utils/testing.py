@@ -4,6 +4,9 @@ from torchrl.envs import GymWrapper
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 import numpy as np
 import wandb
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.stats import norm as sp_norm
 
 
 def _var(x: np.ndarray, level: float) -> float:
@@ -70,6 +73,145 @@ def compute_risk_metrics(pnl: np.ndarray) -> dict:
     return metrics
 
 
+def _log_pnl_distribution(terminal_pnl: np.ndarray) -> None:
+    """Graph 2: Histogram of terminal P&L distribution."""
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=terminal_pnl.tolist(), nbinsx=60, name="Terminal P&L",
+        marker_color="steelblue", opacity=0.75,
+    ))
+    fig.update_layout(
+        title="Terminal Hedging P&L Distribution",
+        xaxis_title="Terminal P&L",
+        yaxis_title="Count",
+        bargap=0.05,
+    )
+    wandb.log({"final/pnl_distribution": wandb.Plotly(fig)})
+
+
+def _log_delta_paths(base_env, n_paths: int = 5) -> None:
+    """Graph 3: Learned delta paths vs analytical BS delta (BSM envs only)."""
+    if not hasattr(base_env, 'shares_held'):
+        return
+
+    shares = base_env.shares_held          # (P, A, K, T+1)
+    num_show   = min(n_paths, base_env.num_paths)
+    num_assets = base_env.num_assets
+    num_strikes = base_env.num_strikes
+    num_steps  = base_env.num_steps
+    T_mat = base_env.maturity
+    dt    = T_mat / num_steps
+    times = (np.arange(num_steps + 1) * dt).tolist()
+
+    has_bsm = hasattr(base_env, 'simulator') and hasattr(base_env.simulator, 'sigma')
+    ncols = max(1, num_assets * num_strikes)
+
+    fig = make_subplots(
+        rows=num_show, cols=ncols,
+        subplot_titles=[f"Path {p+1}" for p in range(num_show * ncols)],
+        shared_xaxes=True, vertical_spacing=0.08, horizontal_spacing=0.05,
+    )
+
+    for p in range(num_show):
+        for i in range(num_assets):
+            for j in range(num_strikes):
+                col_idx = i * num_strikes + j + 1
+                show_legend = (p == 0 and i == 0 and j == 0)
+                learned = shares[p, i, j, :].tolist()
+
+                fig.add_trace(
+                    go.Scatter(x=times, y=learned, mode='lines',
+                               name='Learned δ', line=dict(color='steelblue'),
+                               showlegend=show_legend),
+                    row=p + 1, col=col_idx,
+                )
+
+                if has_bsm:
+                    sigma_i = float(base_env.simulator.sigma[i])
+                    K_ij    = float(base_env.K[i, j])
+                    r       = base_env.r
+                    bs_deltas = []
+                    for t_idx in range(num_steps + 1):
+                        S   = float(base_env.stock_prices[p, i, t_idx])
+                        tau = T_mat - t_idx * dt
+                        if tau <= 1e-6:
+                            bs_deltas.append(1.0 if S > K_ij else 0.0)
+                        else:
+                            d1 = (np.log(S / K_ij) + (r + 0.5 * sigma_i**2) * tau) / (sigma_i * np.sqrt(tau))
+                            bs_deltas.append(float(sp_norm.cdf(d1)))
+                    fig.add_trace(
+                        go.Scatter(x=times, y=bs_deltas, mode='lines',
+                                   name='BS δ', line=dict(color='crimson', dash='dash'),
+                                   showlegend=show_legend),
+                        row=p + 1, col=col_idx,
+                    )
+
+    fig.update_layout(
+        title="Learned Delta Paths vs BS Analytical Delta",
+        height=max(300, 280 * num_show),
+        xaxis_title="Time",
+    )
+    wandb.log({"final/delta_paths": wandb.Plotly(fig)})
+
+
+def _log_transaction_cost_scatter(base_env, terminal_pnl: np.ndarray) -> None:
+    """Graph 5: Per-path total transaction cost vs terminal P&L scatter."""
+    if not hasattr(base_env, 'shares_held'):
+        return
+
+    shares   = base_env.shares_held                              # (P, A, K, T+1)
+    S        = base_env.stock_prices                             # (P, A, T+1)
+    fee_rate = getattr(base_env, 'transaction_fee_rate', 0.0)
+
+    delta_shares = np.diff(shares, axis=-1)                      # (P, A, K, T)
+    S_exp = S[:, :, np.newaxis, :delta_shares.shape[-1]]         # (P, A, 1, T)
+    per_path_cost = (np.abs(delta_shares * S_exp) * fee_rate).sum(axis=(1, 2, 3))  # (P,)
+
+    per_path_pnl = terminal_pnl.reshape(
+        base_env.num_paths, base_env.num_assets, base_env.num_strikes
+    ).mean(axis=(1, 2))                                          # (P,)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=per_path_cost.tolist(), y=per_path_pnl.tolist(),
+        mode='markers',
+        marker=dict(size=5, opacity=0.6, color='steelblue'),
+        name='Paths',
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.5)
+    fig.update_layout(
+        title="Transaction Costs vs Terminal P&L (per path)",
+        xaxis_title="Total Transaction Cost",
+        yaxis_title="Terminal P&L",
+    )
+    wandb.log({"final/cost_vs_pnl": wandb.Plotly(fig)})
+
+
+def _log_action_magnitude_distribution(rollout) -> None:
+    """Graph 6: Histogram of rebalancing trade sizes |δ_t − δ_{t-1}|."""
+    actions = rollout["action"].detach().cpu().numpy()   # (num_envs, num_steps, A)
+
+    if actions.ndim == 3:
+        deltas = np.abs(np.diff(actions, axis=1)).flatten()
+    elif actions.ndim == 2:
+        deltas = np.abs(np.diff(actions, axis=0)).flatten()
+    else:
+        deltas = np.abs(np.diff(actions.flatten()))
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=deltas.tolist(), nbinsx=60, name="|Δδ|",
+        marker_color="steelblue", opacity=0.75,
+    ))
+    fig.update_layout(
+        title="Action Magnitude Distribution |δ_t − δ_{t-1}|",
+        xaxis_title="|δ_t − δ_{t-1}|",
+        yaxis_title="Count",
+        bargap=0.05,
+    )
+    wandb.log({"final/action_magnitude_distribution": wandb.Plotly(fig)})
+
+
 def test_model(base_env, model, num_steps, device, plotting=False):
     env = GymWrapper(base_env, device=device)
     env.reset(seed=0)
@@ -131,6 +273,10 @@ def test_model(base_env, model, num_steps, device, plotting=False):
 
     if plotting:
         plot_portfolio_vs_option_price(env._env)
+        _log_pnl_distribution(terminal_pnl)
+        _log_delta_paths(env._env)
+        _log_transaction_cost_scatter(env._env, terminal_pnl)
+        _log_action_magnitude_distribution(rollout)
 
     return terminal_pnl, metrics
 
