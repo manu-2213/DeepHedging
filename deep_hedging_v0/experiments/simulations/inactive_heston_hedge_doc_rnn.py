@@ -206,7 +206,8 @@ def main():
     )
 
     # Use test_model to evaluate and log results to wandb
-    test_model(base_env, joint_policy, num_steps, device, plotting=True)
+    test_model(base_env, joint_policy, num_steps, device, plotting=True,
+               models_to_save={"action_model": action_model, "inaction_model": inaction_model})
 
 if __name__ == "__main__":
     main()

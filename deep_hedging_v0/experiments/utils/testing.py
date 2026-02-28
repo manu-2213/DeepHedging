@@ -1,4 +1,7 @@
 
+import os
+import torch
+import matplotlib.pyplot as plt
 from hedging.plot_utils import plot_portfolio_vs_option_price
 from torchrl.envs import GymWrapper
 from torchrl.envs.utils import ExplorationType, set_exploration_type
@@ -71,6 +74,90 @@ def compute_risk_metrics(pnl: np.ndarray) -> dict:
         "max":              float(r.max()),
     }
     return metrics
+
+
+# Default folder for saved P&L plots (experiments/plots/ next to experiments/utils/)
+_DEFAULT_PLOTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "plots")
+)
+
+# Default folder for saved model checkpoints
+_DEFAULT_WEIGHTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "weights")
+)
+
+
+def save_checkpoint(
+    models: dict,
+    run_name: str,
+    weights_dir: str = _DEFAULT_WEIGHTS_DIR,
+) -> None:
+    """
+    Save model state_dicts to experiments/weights/.
+    Filename: <run_name>_run<NNN>_<model_name>.pt
+    The run number is auto-incremented based on existing files in weights_dir.
+    """
+    os.makedirs(weights_dir, exist_ok=True)
+
+    # Find the highest existing run number for this run_name
+    prefix = run_name + "_run"
+    max_run = 0
+    for fname in os.listdir(weights_dir):
+        if fname.startswith(prefix) and fname.endswith(".pt"):
+            rest = fname[len(prefix):]          # e.g. "003_action_model.pt"
+            num_str = rest.split("_")[0]        # "003"
+            try:
+                max_run = max(max_run, int(num_str))
+            except ValueError:
+                pass
+    next_run = max_run + 1
+
+    for model_name, model in models.items():
+        fname = f"{run_name}_run{next_run:03d}_{model_name}.pt"
+        path = os.path.join(weights_dir, fname)
+        state = model.state_dict() if hasattr(model, "state_dict") else model
+        torch.save(state, path)
+        print(f"  Checkpoint saved \u2192 {path}")
+
+
+def _save_pnl_histogram(
+    terminal_pnl: np.ndarray,
+    metrics: dict,
+    script_name: str,
+    plots_dir: str = _DEFAULT_PLOTS_DIR,
+) -> None:
+    """Save a 50-bin P&L histogram with VaR/CVaR/mean markers to disk."""
+    os.makedirs(plots_dir, exist_ok=True)
+
+    var95  = metrics["var_95"]
+    cvar95 = metrics["cvar_95"]
+    mean   = metrics["mean"]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(
+        terminal_pnl, bins=50,
+        color="steelblue", alpha=0.75,
+        edgecolor="white", linewidth=0.4,
+    )
+    # VaR/CVaR are expressed as positive losses; flip sign to mark on the P&L axis
+    ax.axvline(-var95,  color="orange",  lw=1.8, linestyle="--",
+               label=f"VaR  95% = {var95:.2f}")
+    ax.axvline(-cvar95, color="crimson", lw=1.8, linestyle="--",
+               label=f"CVaR 95% = {cvar95:.2f}")
+    ax.axvline(mean,    color="seagreen", lw=1.4, linestyle=":",
+               label=f"Mean     = {mean:.2f}")
+    ax.axvline(0, color="black", lw=0.8, linestyle="-", alpha=0.3)
+
+    ax.set_xlabel("Terminal P\u200b&L  (portfolio value \u2212 option payoff at maturity)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"P\u200b&L Distribution \u2014 {script_name}")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+
+    out_path = os.path.join(plots_dir, f"{script_name}_pnl.png")
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"  P&L histogram saved \u2192 {out_path}")
 
 
 def _log_pnl_distribution(terminal_pnl: np.ndarray) -> None:
@@ -212,7 +299,7 @@ def _log_action_magnitude_distribution(rollout) -> None:
     wandb.log({"final/action_magnitude_distribution": wandb.Plotly(fig)})
 
 
-def test_model(base_env, model, num_steps, device, plotting=False):
+def test_model(base_env, model, num_steps, device, plotting=False, models_to_save=None):
     env = GymWrapper(base_env, device=device)
     env.reset(seed=0)
 
@@ -270,6 +357,20 @@ def test_model(base_env, model, num_steps, device, plotting=False):
 
     # Log all metrics to wandb
     wandb.log({f"final/{k}": v for k, v in metrics.items()})
+
+    # Derive script name from wandb run (each sim sets wandb name = filename)
+    _script_name = (
+        wandb.run.name
+        if wandb.run is not None and wandb.run.name
+        else "run"
+    )
+
+    # Save P&L histogram to disk (experiments/plots/<script_name>_pnl.png)
+    _save_pnl_histogram(terminal_pnl, metrics, _script_name)
+
+    # Save model checkpoints (experiments/weights/)
+    _to_save = models_to_save if models_to_save is not None else {"policy": model}
+    save_checkpoint(_to_save, _script_name)
 
     if plotting:
         plot_portfolio_vs_option_price(env._env)

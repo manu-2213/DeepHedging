@@ -100,12 +100,13 @@ def action_training(env,
             # average reward in this batch (all paths, all steps)
             avg_reward = batch["next", "reward"].mean().item()
 
-            # Graph 4 – risk metrics from per-env episode returns
-            # (avoids reading base_env arrays which are cleared by TorchRL's internal reset)
-            _ep_returns = batch["next", "reward"].reshape(-1, env.num_envs).sum(dim=0).cpu().numpy()
-            _losses = -_ep_returns
-            _var95  = float(np.percentile(_losses, 95))
-            _cvar95 = float(_losses[_losses >= _var95].mean()) if (_losses >= _var95).any() else _var95
+            # Graph 4 – risk metrics: terminal hedging error |portfolio_T - option_T|
+            # Use only the LAST step reward per env (= -|portfolio_T - option_T| at maturity),
+            # NOT the sum over all steps, which would be a cumulative RL return, not a financial metric.
+            _terminal_rewards = batch["next", "reward"].reshape(-1, env.num_envs)[-1, :].cpu().numpy()
+            _terminal_errors = -_terminal_rewards  # positive: |portfolio_T - option_T|
+            _var95  = float(np.percentile(_terminal_errors, 95))
+            _cvar95 = float(_terminal_errors[_terminal_errors >= _var95].mean()) if (_terminal_errors >= _var95).any() else _var95
 
             # after collector loop (one batch), log reward and losses for this episode
             reward_history.append(avg_reward)
@@ -310,11 +311,13 @@ def actor_inactor_training(
             else:
                 inaction_rate = 0.0
 
-            # Graph 4 – risk metrics from per-env episode returns
-            _ep_returns = last_batch["next", "reward"].reshape(-1, env.num_envs).sum(dim=0).cpu().numpy()
-            _losses = -_ep_returns
-            _var95  = float(np.percentile(_losses, 95))
-            _cvar95 = float(_losses[_losses >= _var95].mean()) if (_losses >= _var95).any() else _var95
+            # Graph 4 – risk metrics: terminal hedging error |portfolio_T - option_T|
+            # Use only the LAST step reward per env (= -|portfolio_T - option_T| at maturity),
+            # NOT the sum over all steps, which would be a cumulative RL return, not a financial metric.
+            _terminal_rewards = last_batch["next", "reward"].reshape(-1, env.num_envs)[-1, :].cpu().numpy()
+            _terminal_errors = -_terminal_rewards  # positive: |portfolio_T - option_T|
+            _var95  = float(np.percentile(_terminal_errors, 95))
+            _cvar95 = float(_terminal_errors[_terminal_errors >= _var95].mean()) if (_terminal_errors >= _var95).any() else _var95
 
             # Print training progress at regular intervals
             if (episode + 1) % log_interval == 0:
