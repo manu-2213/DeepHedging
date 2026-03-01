@@ -21,7 +21,7 @@ class EnvConfig:
     r: float = 0.01
     num_paths: int = 100
     num_paths_heston: int = 20 # Very compute heavy
-    num_steps: int = 250
+    num_steps: int = 1 #250
     history_len: int = 1
     history_len_rnn: int = 5
     transaction_cost: bool = True
@@ -43,12 +43,12 @@ class PPOConfig:
 
 @dataclass
 class TrainingConfig:
-    num_epochs: int = 30
+    num_epochs: int = 1 #30
     policy_epochs: int = 20 
     inaction_epochs: int = 10 
     num_episodes: int = 400
     sub_batch_num: int = 16
-    hidden_size: int = 128
+    hidden_size: int = 1 #128
 
 def train_test_split(dynamics: str, train_size: int, market: str):
     if dynamics == "heston":
