@@ -114,7 +114,7 @@ def main():
 
     wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
 
-    model = action_training(
+    model, _ = action_training(
         env,
         model,
         num_epochs,
