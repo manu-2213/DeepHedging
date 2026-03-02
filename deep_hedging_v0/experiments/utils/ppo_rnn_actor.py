@@ -62,9 +62,9 @@ def create_ppo_rnn_actor(input_dim, action_dim, hidden_dim=64, num_layers=2):
 
     critic = ValueOperator(
         module=nn.Sequential(
-            nn.Linear(hidden_dim, int(hidden_dim/2)),
+            nn.Linear(hidden_dim, 8),
             nn.Tanh(),
-            nn.Linear(int(hidden_dim/2), 1)
+            nn.Linear(8, 1)
         ),
         in_keys=["feature"],
         out_keys=["state_value"],
