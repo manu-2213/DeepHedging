@@ -5,6 +5,8 @@ from gymnasium import spaces
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
 
+FLOAT_DTYPE = np.float32
+
 
 class HedgeBase(VectorEnv, ABC):
     def __init__(
@@ -40,8 +42,8 @@ class HedgeBase(VectorEnv, ABC):
         - num_steps: Number of time steps in each simulation
         """
 
-        self.S0 = S0
-        self.K = K
+        self.S0 = np.asarray(S0, dtype=FLOAT_DTYPE)
+        self.K = np.asarray(K, dtype=FLOAT_DTYPE)
         self.maturity = maturity
         self.r = r
         self.num_paths = num_paths
@@ -89,10 +91,12 @@ class HedgeBase(VectorEnv, ABC):
     def reset_portfolio(self):
         # Reset portfolio
         self.cash_account = np.zeros(
-            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1)
+            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1),
+            dtype=FLOAT_DTYPE,
         )
         self.portfolio_value = np.zeros(
-            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1)
+            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1),
+            dtype=FLOAT_DTYPE,
         )
         # Add cash since the option was just sold
         self.cash_account[..., 0] = self.option_prices[..., 0] # This defined later?
@@ -121,7 +125,8 @@ class HedgeBase(VectorEnv, ABC):
         self.reset_portfolio()
         # Reset asset positions
         self.shares_held = np.zeros(
-            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1)
+            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1),
+            dtype=FLOAT_DTYPE,
         )
         # Initial state features
         self.state[:, -1, :] = self._create_observations()

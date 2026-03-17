@@ -292,11 +292,11 @@ def build_ql_helpers(
     spot_handle = ql.QuoteHandle(ql.SimpleQuote(float(spot)))
 
     # --- pre-compute BS vegas ---
-    S_arr  = df_cal["forward_price"].values.astype(float)
-    K_arr  = df_cal["strike_price"].values.astype(float)
-    r_arr  = df_cal["risk_free_rate"].values.astype(float)
-    T_arr  = df_cal["tau"].values.astype(float)
-    iv_arr = df_cal["implied_vol"].values.astype(float)
+    S_arr  = df_cal["forward_price"].values.astype(np.float32)
+    K_arr  = df_cal["strike_price"].values.astype(np.float32)
+    r_arr  = df_cal["risk_free_rate"].values.astype(np.float32)
+    T_arr  = df_cal["tau"].values.astype(np.float32)
+    iv_arr = df_cal["implied_vol"].values.astype(np.float32)
     vegas  = batch_bs_vega(S_arr, K_arr, r_arr, T_arr, iv_arr)
     money  = K_arr / S_arr
 
@@ -664,10 +664,10 @@ def calibrate_market_year(market: str, year: str) -> dict | None:
     S0, ann_ret, ann_vol, all_strikes = bsm_summary(df)
 
     # ── pre-filter ──
-    S = df["forward_price"].values.astype(float)
-    K = df["strike_price"].values.astype(float)
-    T = df["tau"].values.astype(float)
-    P = df["option_price"].values.astype(float)
+    S = df["forward_price"].values.astype(np.float32)
+    K = df["strike_price"].values.astype(np.float32)
+    T = df["tau"].values.astype(np.float32)
+    P = df["option_price"].values.astype(np.float32)
     mon = K / S
     mask = (
         (P > 0) & (S > 0) & (K > 0)
@@ -703,11 +703,11 @@ def calibrate_market_year(market: str, year: str) -> dict | None:
         # implied vols
         t0 = time.time()
         df_d["implied_vol"] = batch_implied_vol(
-            df_d["forward_price"].values.astype(float),
-            df_d["strike_price"].values.astype(float),
-            df_d["risk_free_rate"].values.astype(float),
-            df_d["tau"].values.astype(float),
-            df_d["option_price"].values.astype(float),
+            df_d["forward_price"].values.astype(np.float32),
+            df_d["strike_price"].values.astype(np.float32),
+            df_d["risk_free_rate"].values.astype(np.float32),
+            df_d["tau"].values.astype(np.float32),
+            df_d["option_price"].values.astype(np.float32),
             (df_d["is_call"].values == 1),
         )
         print(f"  IVs computed in {time.time() - t0:.1f}s")

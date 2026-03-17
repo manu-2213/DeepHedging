@@ -4,11 +4,14 @@ import jax.numpy as jnp
 from jax import jit, vmap, lax
 from functools import partial
 import jax.random as jrandom
-# Enable 64-bit precision 
-jax.config.update("jax_enable_x64", True)
+# Keep JAX on float32 for throughput and memory use.
+jax.config.update("jax_enable_x64", False)
 from scipy.stats import norm
 from abc import ABC, abstractmethod
 from hedging.black_scholes_model import black_scholes_d1_d2, black_scholes_pricer
+
+NP_DTYPE = np.float32
+JNP_DTYPE = jnp.float32
 
 class Simulators(ABC):
 
@@ -16,15 +19,15 @@ class Simulators(ABC):
     def __init__(self, S0, r, maturity, num_steps, num_paths, random_generator):
         assert type(r) == float
         assert type(maturity) == float
-        self.S0 = S0
+        self.S0 = np.asarray(S0, dtype=NP_DTYPE)
         self.num_assets = len(S0)
         self.r = r
         self.maturity = maturity
         self.num_steps = num_steps
         self.num_paths = num_paths
-        self.T = np.linspace(self.maturity, 0, self.num_steps + 1)
+        self.T = np.linspace(self.maturity, 0, self.num_steps + 1, dtype=NP_DTYPE)
         self.dt = self.maturity / self.num_steps
-        self.paths = np.zeros((self.num_paths, self.num_assets, self.num_steps + 1))
+        self.paths = np.zeros((self.num_paths, self.num_assets, self.num_steps + 1), dtype=NP_DTYPE)
         self.paths[:, :, 0] = np.tile(self.S0, (self.num_paths, 1))
         self.np_random = random_generator
 
@@ -53,19 +56,19 @@ class BlackScholesSimulator(Simulators):
     def __init__(self, S0, r, sigma, maturity, num_steps, num_paths, random_generator):
         super().__init__(S0, r, maturity, num_steps, num_paths, random_generator)
         assert len(S0) == len(sigma)
-        self.sigma = sigma
+        self.sigma = np.asarray(sigma, dtype=NP_DTYPE)
         self.generate_asset_prices()
 
     def generate_asset_prices(self):
         S0_expanded = self.paths[:, :, 0:1]
         z = self.np_random.normal(
             0, 1, (self.num_paths, self.num_assets, self.num_steps)
-        )
+        ).astype(NP_DTYPE, copy=False)
         log_returns = (
             self.r - 0.5 * self.sigma[None, :, None] ** 2
         ) * self.dt + self.sigma[None, :, None] * np.sqrt(self.dt) * z
         log_S = np.log(S0_expanded) + np.cumsum(log_returns, axis=-1)
-        asset_prices = np.exp(log_S)
+        asset_prices = np.exp(log_S).astype(NP_DTYPE, copy=False)
         self.paths[:, :, 1:] = asset_prices
 
     def expand_dim(self, K):
@@ -209,32 +212,32 @@ class HestonSimulator:
         phi_max=50.0,
     ):
         # Validate inputs
-        S0 = np.asarray(S0)
-        v0 = np.asarray(v0)
-        theta = np.asarray(theta)
-        rho = np.asarray(rho)
-        kappa = np.asarray(kappa)
-        xi = np.asarray(xi)
+        S0 = np.asarray(S0, dtype=NP_DTYPE)
+        v0 = np.asarray(v0, dtype=NP_DTYPE)
+        theta = np.asarray(theta, dtype=NP_DTYPE)
+        rho = np.asarray(rho, dtype=NP_DTYPE)
+        kappa = np.asarray(kappa, dtype=NP_DTYPE)
+        xi = np.asarray(xi, dtype=NP_DTYPE)
         
         assert len(S0) == len(v0) == len(theta) == len(rho) == len(kappa) == len(xi), (
             f"All parameter arrays must have the same length"
         )
         
         # Store as JAX arrays for GPU compatibility
-        self.S0 = jnp.asarray(S0, dtype=jnp.float64)
+        self.S0 = jnp.asarray(S0, dtype=JNP_DTYPE)
         self.r = float(r)
-        self.v0 = jnp.asarray(v0, dtype=jnp.float64)
-        self.theta = jnp.asarray(theta, dtype=jnp.float64)
-        self.rho = jnp.asarray(rho, dtype=jnp.float64)
-        self.kappa = jnp.asarray(kappa, dtype=jnp.float64)
-        self.xi = jnp.asarray(xi, dtype=jnp.float64)
+        self.v0 = jnp.asarray(v0, dtype=JNP_DTYPE)
+        self.theta = jnp.asarray(theta, dtype=JNP_DTYPE)
+        self.rho = jnp.asarray(rho, dtype=JNP_DTYPE)
+        self.kappa = jnp.asarray(kappa, dtype=JNP_DTYPE)
+        self.xi = jnp.asarray(xi, dtype=JNP_DTYPE)
         
         self.num_assets = len(S0)
         self.maturity = float(maturity)
         self.num_steps = int(num_steps)
         self.num_paths = int(num_paths)
         self.dt = self.maturity / self.num_steps
-        self.T = jnp.linspace(self.maturity, 0.0, self.num_steps + 1)
+        self.T = jnp.linspace(self.maturity, 0.0, self.num_steps + 1, dtype=JNP_DTYPE)
         
         self.n_points = n_points
         self.mc_paths = mc_paths
@@ -250,7 +253,7 @@ class HestonSimulator:
             self.seed = int(seed)
         
         # Pre-compute phi grid for characteristic function integration
-        self.phi_grid = jnp.linspace(1e-8, phi_max, n_points)
+        self.phi_grid = jnp.linspace(1e-8, phi_max, n_points, dtype=JNP_DTYPE)
         self.dx = float(self.phi_grid[1] - self.phi_grid[0])
         
         # Generate paths using JAX
@@ -324,8 +327,8 @@ class HestonSimulator:
         self._S = jnp.concatenate([S0_exp, S_history], axis=-1)
         
         # NumPy-compatible aliases for backward compatibility
-        self.paths = np.array(self._S)
-        self.v = np.array(self._V)
+        self.paths = np.array(self._S, dtype=NP_DTYPE)
+        self.v = np.array(self._V, dtype=NP_DTYPE)
     
     @property
     def S(self):
@@ -368,7 +371,7 @@ class HestonSimulator:
         cf = self._heston_cf(phi, S, T, v0, kappa, theta, rho, xi, r, trap, u)
         integrand = jnp.real((jnp.exp(-1j * phi * jnp.log(K)) * cf) / (1j * phi))
         # Flatten integrand to 1D and integrate
-        integrand_flat = np.asarray(integrand).flatten()
+        integrand_flat = np.asarray(integrand, dtype=NP_DTYPE).flatten()
         integral = np.trapezoid(integrand_flat, dx=self.dx)
         return 0.5 + (1.0 / np.pi) * integral
     
@@ -388,14 +391,14 @@ class HestonSimulator:
         ndarray
             Call prices, shape (num_paths, num_assets, num_strikes, num_steps+1)
         """
-        K = np.asarray(K)
+        K = np.asarray(K, dtype=NP_DTYPE)
         P, A, N = self.num_paths, self.num_assets, self.num_steps
         M = K.shape[1]
         
         # Expand dimensions
-        S = np.array(self.S)[:, :, None, :]  # (P, A, 1, N+1)
+        S = np.array(self.S, dtype=NP_DTYPE)[:, :, None, :]  # (P, A, 1, N+1)
         K_exp = np.broadcast_to(K[None, :, :, None], (P, A, M, N + 1))
-        T_exp = np.broadcast_to(np.array(self.T)[None, None, None, :], (P, A, M, N + 1))
+        T_exp = np.broadcast_to(np.array(self.T, dtype=NP_DTYPE)[None, None, None, :], (P, A, M, N + 1))
         
         # Terminal payoff (intrinsic value at maturity)
         last_prices = np.maximum(0.0, S[..., -1] - K_exp[..., -1])
@@ -404,7 +407,7 @@ class HestonSimulator:
             return last_prices[..., None]
         
         # Price at each time step using characteristic function integration
-        prices = np.zeros((P, A, M, N))
+        prices = np.zeros((P, A, M, N), dtype=NP_DTYPE)
         phi = self.phi_grid
         
         for p in range(P):
@@ -434,20 +437,20 @@ class HestonSimulator:
                             )
                             prices[p, a, m, t] = S_pamt * P1 - K_am * np.exp(-self.r * T_t) * P2
         
-        return np.concatenate([prices, last_prices[..., None]], axis=-1)
+        return np.concatenate([prices, last_prices[..., None]], axis=-1).astype(NP_DTYPE, copy=False)
     
     def euro_put(self, K, trap=1):
         """Price European put options via put-call parity."""
         C = self.euro_call(K, trap=trap)
-        K = np.asarray(K)
+        K = np.asarray(K, dtype=NP_DTYPE)
         P, A, N = self.num_paths, self.num_assets, self.num_steps
         M = K.shape[1]
         
-        S = np.array(self.S)[:, :, None, :]
+        S = np.array(self.S, dtype=NP_DTYPE)[:, :, None, :]
         K_exp = np.broadcast_to(K[None, :, :, None], (P, A, M, N + 1))
-        T_exp = np.broadcast_to(np.array(self.T)[None, None, None, :], (P, A, M, N + 1))
+        T_exp = np.broadcast_to(np.array(self.T, dtype=NP_DTYPE)[None, None, None, :], (P, A, M, N + 1))
         
-        return C - S + K_exp * np.exp(-self.r * T_exp)
+        return (C - S + K_exp * np.exp(-self.r * T_exp)).astype(NP_DTYPE, copy=False)
     
     def cash_or_nothing_call(self, K, Q=1.0, trap=1):
         """
@@ -457,22 +460,22 @@ class HestonSimulator:
         """
         # Ensure Q is a scalar
         Q = float(np.asarray(Q).flatten()[0]) if hasattr(Q, '__iter__') else float(Q)
-        K = np.asarray(K)
+        K = np.asarray(K, dtype=NP_DTYPE)
         P, A, N = self.num_paths, self.num_assets, self.num_steps
         M = K.shape[1]
         
-        S = np.array(self.S)[:, :, None, :]
+        S = np.array(self.S, dtype=NP_DTYPE)[:, :, None, :]
         K_exp = np.broadcast_to(K[None, :, :, None], (P, A, M, N + 1))
-        T_exp = np.broadcast_to(np.array(self.T)[None, None, None, :], (P, A, M, N + 1))
+        T_exp = np.broadcast_to(np.array(self.T, dtype=NP_DTYPE)[None, None, None, :], (P, A, M, N + 1))
         
         # Terminal payoff
-        last_prices = Q * (S[..., -1] > K_exp[..., -1]).astype(float)
+        last_prices = (Q * (S[..., -1] > K_exp[..., -1])).astype(NP_DTYPE, copy=False)
         
         if N == 0:
             return last_prices[..., None]
         
         # Price via P2 probability
-        prices = np.zeros((P, A, M, N))
+        prices = np.zeros((P, A, M, N), dtype=NP_DTYPE)
         phi = self.phi_grid
         
         for p in range(P):
@@ -498,7 +501,7 @@ class HestonSimulator:
                             )
                             prices[p, a, m, t] = Q * np.exp(-self.r * T_t) * P2
         
-        return np.concatenate([prices, last_prices[..., None]], axis=-1)
+        return np.concatenate([prices, last_prices[..., None]], axis=-1).astype(NP_DTYPE, copy=False)
     
     def down_out_call(self, K, H, mc_paths=None, enforce_upper_bound=True, seed=None):
         """
@@ -527,14 +530,14 @@ class HestonSimulator:
         
         P, A, N = self.num_paths, self.num_assets, self.num_steps
         dt = self.dt
-        S_outer = np.array(self.S)
-        v_outer = np.array(self.V)
+        S_outer = np.array(self.S, dtype=NP_DTYPE)
+        v_outer = np.array(self.V, dtype=NP_DTYPE)
         
-        K = np.asarray(K)
+        K = np.asarray(K, dtype=NP_DTYPE)
         M = K.shape[1]
-        H = np.asarray(H)
+        H = np.asarray(H, dtype=NP_DTYPE)
         if H.ndim == 0:
-            H_full = np.full((A, M), float(H))
+            H_full = np.full((A, M), float(H), dtype=NP_DTYPE)
         else:
             H_full = np.broadcast_to(H if H.shape == (A, M) else H.reshape(A, -1), (A, M))
         
@@ -544,7 +547,7 @@ class HestonSimulator:
         H_exp = np.broadcast_to(H_full[None, :, :, None], (P, A, M, N + 1))
         alive_prefix = np.minimum.accumulate(S_exp > H_exp, axis=-1)
         
-        V = np.zeros((P, A, M, N + 1))
+        V = np.zeros((P, A, M, N + 1), dtype=NP_DTYPE)
         V[..., -1] = np.maximum(S_exp[..., -1] - K_exp[..., -1], 0.0) * alive_prefix[..., -1]
         
         if N == 0:
@@ -562,7 +565,7 @@ class HestonSimulator:
         def _cond_batch(S0_vec, v0_vec, K_vec, H_vec, asset_idx_vec, steps_rem, T_rem):
             B = S0_vec.shape[0]
             if B == 0:
-                return np.zeros((0,), dtype=float)
+                return np.zeros((0,), dtype=NP_DTYPE)
             kappa_b = kappa[asset_idx_vec]
             theta_b = theta[asset_idx_vec]
             rho_b = rho[asset_idx_vec]
@@ -603,7 +606,7 @@ class HestonSimulator:
             if enforce_upper_bound:
                 V[idx_p, idx_a, idx_m, t] = np.minimum(V[idx_p, idx_a, idx_m, t], vanilla[idx_p, idx_a, idx_m, t])
         
-        return V
+        return V.astype(NP_DTYPE, copy=False)
     
     def generate_asset_prices(self):
         """Regenerate paths with a new random seed."""

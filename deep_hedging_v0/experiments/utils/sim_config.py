@@ -118,27 +118,27 @@ def training_to_wandb_config(training: TrainingConfig, ppo: PPOConfig, extra: Di
 def _default_heston_params() -> Dict[str, np.ndarray]:
     """Internal helper returning canonical Heston stochastic-vol parameters."""
     return {
-        "kappa": np.array([5.0, 2.5, 3.0], dtype=np.float64),
-        "theta": np.array([0.05, 0.035, 0.045], dtype=np.float64),
-        "rho": np.array([-0.8, -0.6, -0.5], dtype=np.float64),
-        "sigma": np.array([0.5, 0.4, 0.55], dtype=np.float64),
-        "lda": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        "kappa": np.array([5.0, 2.5, 3.0], dtype=np.float32),
+        "theta": np.array([0.05, 0.035, 0.045], dtype=np.float32),
+        "rho": np.array([-0.8, -0.6, -0.5], dtype=np.float32),
+        "sigma": np.array([0.5, 0.4, 0.55], dtype=np.float32),
+        "lda": np.array([0.0, 0.0, 0.0], dtype=np.float32),
     }
 
 
 def get_heston_call_config() -> Dict[str, object]:
     """Returns default spot, strike, and calibration values for call options under Heston."""
     return {
-        "S0": np.array([100.0, 120.0, 80.0], dtype=np.float64),
+        "S0": np.array([100.0, 120.0, 80.0], dtype=np.float32),
         "K": np.array(
             [
                 [90.0, 100.0, 110.0],
                 [100.0, 120.0, 140.0],
                 [70.0, 80.0, 90.0],
             ],
-            dtype=np.float64,
+            dtype=np.float32,
         ),
-        "v0": np.array([0.05, 0.04, 0.06], dtype=np.float64),
+        "v0": np.array([0.05, 0.04, 0.06], dtype=np.float32),
         "r": 0.03,
         "maturity": 1.0,
         "num_paths": 100,
@@ -156,14 +156,14 @@ def get_heston_call_config() -> Dict[str, object]:
 def get_heston_doc_config() -> Dict[str, object]:
     """Returns default parameters for down-and-out call (DOC) hedging under Heston."""
     return {
-        "S0": np.array([50.0, 100.0, 200.0], dtype=np.float64),
+        "S0": np.array([50.0, 100.0, 200.0], dtype=np.float32),
         "K": np.array(
             [
                 [52.5, 55.0],
                 [105.0, 110.0],
                 [210.0, 220.0],
             ],
-            dtype=np.float64,
+            dtype=np.float32,
         ),
         "H": np.array(
             [
@@ -171,9 +171,9 @@ def get_heston_doc_config() -> Dict[str, object]:
                 [85.0, 90.0],
                 [170.0, 180.0],
             ],
-            dtype=np.float64,
+            dtype=np.float32,
         ),
-        "v0": np.array([0.15, 0.2, 0.25], dtype=np.float64),
+        "v0": np.array([0.15, 0.2, 0.25], dtype=np.float32),
         "r": 0.05,
         "maturity": 1.0,
         "num_paths": 100,

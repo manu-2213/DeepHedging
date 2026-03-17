@@ -53,7 +53,8 @@ class HedgeCallBS(HedgeCall):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.state = np.zeros(
-            (self.num_total_options, self.history_len, self.feature_dim)
+            (self.num_total_options, self.history_len, self.feature_dim),
+            dtype=np.float32,
         )
         self.simulator = BlackScholesSimulator(
             self.S0,
@@ -116,7 +117,8 @@ class HedgeDocBS(HedgeDoc):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.state = np.zeros(
-            (self.num_total_options, self.history_len, self.feature_dim)
+            (self.num_total_options, self.history_len, self.feature_dim),
+            dtype=np.float32,
         )
         self.simulator = BlackScholesSimulator(
             self.S0,
@@ -179,7 +181,8 @@ class HedgeConcBS(HedgeConc):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.state = np.zeros(
-            (self.num_total_options, self.history_len, self.feature_dim)
+            (self.num_total_options, self.history_len, self.feature_dim),
+            dtype=np.float32,
         )
         self.simulator = BlackScholesSimulator(
             self.S0,
@@ -250,7 +253,8 @@ class HedgeCallHeston(HedgeCall):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.state = np.zeros(
-            (self.num_total_options, self.history_len, self.feature_dim)
+            (self.num_total_options, self.history_len, self.feature_dim),
+            dtype=np.float32,
         )
         # Smart soft reset: skip path regeneration if seed hasn't changed
         # This handles auto-resets at episode end (seed=None) efficiently
@@ -348,7 +352,8 @@ class HedgeDocHeston(HedgeDoc):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.state = np.zeros(
-            (self.num_total_options, self.history_len, self.feature_dim)
+            (self.num_total_options, self.history_len, self.feature_dim),
+            dtype=np.float32,
         )
         # Smart soft reset: skip path regeneration if seed hasn't changed
         # This handles auto-resets at episode end (seed=None) efficiently
@@ -452,7 +457,8 @@ class HedgeConcHeston(HedgeConc):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.state = np.zeros(
-            (self.num_total_options, self.history_len, self.feature_dim)
+            (self.num_total_options, self.history_len, self.feature_dim),
+            dtype=np.float32,
         )
         # Smart soft reset: skip path regeneration if seed hasn't changed
         # This handles auto-resets at episode end (seed=None) efficiently

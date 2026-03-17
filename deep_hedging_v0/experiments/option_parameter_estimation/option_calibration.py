@@ -414,10 +414,10 @@ def calibrate_market_year(market: str, year: str) -> dict | None:
     S0, ann_ret, ann_vol, all_strikes = bsm_summary(df)
 
     # --- Pre-filter (before computing IVs) ---
-    S = df["forward_price"].values.astype(float)
-    K = df["strike_price"].values.astype(float)
-    T = df["tau"].values.astype(float)
-    P = df["option_price"].values.astype(float)
+    S = df["forward_price"].values.astype(np.float32)
+    K = df["strike_price"].values.astype(np.float32)
+    T = df["tau"].values.astype(np.float32)
+    P = df["option_price"].values.astype(np.float32)
     moneyness = K / S
 
     valid = (
@@ -443,11 +443,11 @@ def calibrate_market_year(market: str, year: str) -> dict | None:
     print(f"  Computing implied vols for {len(df_date)} options ...")
     t0 = time.time()
     df_date["implied_vol"] = batch_implied_vol(
-        df_date["forward_price"].values.astype(float),
-        df_date["strike_price"].values.astype(float),
-        df_date["risk_free_rate"].values.astype(float),
-        df_date["tau"].values.astype(float),
-        df_date["option_price"].values.astype(float),
+        df_date["forward_price"].values.astype(np.float32),
+        df_date["strike_price"].values.astype(np.float32),
+        df_date["risk_free_rate"].values.astype(np.float32),
+        df_date["tau"].values.astype(np.float32),
+        df_date["option_price"].values.astype(np.float32),
         (df_date["is_call"].values == 1),
     )
     print(f"  Implied vols computed in {time.time()-t0:.1f}s")

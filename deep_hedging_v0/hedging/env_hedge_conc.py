@@ -63,10 +63,12 @@ class HedgeConc(HedgeBase):
         self.reset_portfolio()
         # Reset asset positions
         self.call_held = np.zeros(
-            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1)
+            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1),
+            dtype=np.float32,
         )
         self.put_held = np.zeros(
-            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1)
+            (self.num_paths, self.num_assets, self.num_strikes, self.num_steps + 1),
+            dtype=np.float32,
         )
         # Initial state features
         self.state[:, -1, :] = self._create_observations()

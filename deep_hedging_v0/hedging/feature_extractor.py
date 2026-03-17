@@ -1,10 +1,10 @@
 import numpy as np
 # TO DO: add H observation for DOC
 # Define safe_log
-EPS = 1e-8
+EPS = np.float32(1e-8)
 
 def safe_log(x):
-    return np.log(np.clip(a=x, a_min=EPS, a_max=None))
+    return np.log(np.clip(a=x, a_min=EPS, a_max=None)).astype(np.float32, copy=False)
 
 
 def create_observation_hedge_call(
@@ -84,7 +84,7 @@ def create_observation_hedge_call(
     )
 
     # Reshape to have a flat batch dimension
-    return features.reshape(num_total_options, -1)
+    return features.reshape(num_total_options, -1).astype(np.float32, copy=False)
 
 
 def create_observation_hedge_doc(
@@ -145,7 +145,7 @@ def create_observation_hedge_doc(
     )
     # Reshape to have a flat batch dimension
     features_doc = features_doc.reshape(num_total_options, -1)
-    return np.concatenate((features, features_doc), axis=-1)  # Combine features
+    return np.concatenate((features, features_doc), axis=-1).astype(np.float32, copy=False)  # Combine features
 
 def create_observation_hedge_conc(
     current_step,
@@ -205,4 +205,4 @@ def create_observation_hedge_conc(
     )
     # Reshape to have a flat batch dimension
     features_doc = features_doc.reshape(num_total_options, -1)
-    return np.concatenate((features, features_doc), axis=-1)  # Combine features
+    return np.concatenate((features, features_doc), axis=-1).astype(np.float32, copy=False)  # Combine features

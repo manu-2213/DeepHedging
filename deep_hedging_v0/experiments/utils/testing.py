@@ -55,7 +55,8 @@ def compute_risk_metrics(pnl: np.ndarray) -> dict:
                     var_95, var_99, cvar_95, cvar_99,
                     skewness, excess_kurtosis, min, max
     """
-    r = pnl.flatten().astype(float)
+    # Keep final reporting metrics in float64 even when simulation runs in float32.
+    r = pnl.flatten().astype(np.float64)
 
     from scipy.stats import skew, kurtosis  # lazy import
 

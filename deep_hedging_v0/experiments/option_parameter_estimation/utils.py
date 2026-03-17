@@ -133,10 +133,10 @@ def convert_data_heston(data: dict):
     
     years = sorted(data.keys())  # deterministic order
 
-    kappa = np.array([data[y]["kappa"] for y in years], dtype=float)
-    theta = np.array([data[y]["theta"] for y in years], dtype=float)
-    rho   = np.array([data[y]["rho"]   for y in years], dtype=float)
-    sigma = np.array([data[y]["xi"]    for y in years], dtype=float)  
+    kappa = np.array([data[y]["kappa"] for y in years], dtype=np.float32)
+    theta = np.array([data[y]["theta"] for y in years], dtype=np.float32)
+    rho   = np.array([data[y]["rho"]   for y in years], dtype=np.float32)
+    sigma = np.array([data[y]["xi"]    for y in years], dtype=np.float32)  
     lda   = np.zeros_like(kappa)  # lda 0s for now
 
     params = {
@@ -147,10 +147,10 @@ def convert_data_heston(data: dict):
         "lda": lda
     }
 
-    S0 = np.array([data[y]["S0"] for y in years], dtype=float)
-    v0 = np.array([data[y]["v0"] for y in years], dtype=float)
+    S0 = np.array([data[y]["S0"] for y in years], dtype=np.float32)
+    v0 = np.array([data[y]["v0"] for y in years], dtype=np.float32)
 
     # K_sampled as 2D matrix
-    K = np.array([data[y]["K_sampled"] for y in years], dtype=float)
+    K = np.array([data[y]["K_sampled"] for y in years], dtype=np.float32)
 
     return params, S0, K, v0
