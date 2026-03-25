@@ -19,8 +19,8 @@ DEFAULT_WANDB_PROJECT = "deephedging_local_test"
 class EnvConfig:
     maturity: float = 1.0
     r: float = 0.01
-    num_paths: int = 100
-    num_paths_heston: int = 20 # Very compute heavy
+    num_paths: int = 50
+    num_paths_heston: int = 15 # Very compute heavy
     num_steps: int = 250
     history_len: int = 1
     history_len_rnn: int = 5
@@ -38,6 +38,7 @@ class PPOConfig:
     gamma: float = 0.99
     lmbda: float = 0.95
     learning_rate: float = 1e-5 
+    learning_rate_inactive: float = 1e-4
     learning_rate_ex: float = 5e-6
 
 

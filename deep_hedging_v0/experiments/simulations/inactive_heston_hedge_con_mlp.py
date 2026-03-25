@@ -134,7 +134,7 @@ def main():
 
     # Note: training_loop will handle setting keys for loss module
 
-    lr = ppo_cfg.learning_rate
+    lr = ppo_cfg.learning_rate_inactive
     optim_actor = torch.optim.Adam(actor_loss_module.parameters(), lr=lr)
     optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=lr)
 
