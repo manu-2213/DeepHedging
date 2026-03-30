@@ -141,7 +141,7 @@ def main():
     actor_scheduler = CosineAnnealingLR(
         optim_actor,
         T_max=max(1, policy_epochs + inaction_epochs),
-        eta_min=lr / 2,
+        eta_min=lr / 1.3,
     )
     frames_per_batch = env.num_envs * num_steps
     sub_batch_num = trn_cfg.sub_batch_num

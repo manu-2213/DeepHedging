@@ -38,7 +38,7 @@ class PPOConfig:
     gamma: float = 0.99
     lmbda: float = 0.95
     learning_rate: float = 1e-5 
-    learning_rate_inactive: float = 1e-4
+    learning_rate_inactive: float = 2e-5
     learning_rate_ex: float = 5e-6
 
 

@@ -194,12 +194,12 @@ def actor_inactor_training(
         actor_scheduler = CosineAnnealingLR(
             optim_actor,
             T_max=max(1, num_epochs),
-            eta_min=optim_actor.param_groups[0]['lr']/2,
+            eta_min=optim_actor.param_groups[0]['lr']/1.3,
         )
     inactor_scheduler = CosineAnnealingLR(
         optim_inactor,
         T_max=max(1, num_epochs),
-        eta_min=optim_inactor.param_groups[0]['lr']/2,
+        eta_min=optim_inactor.param_groups[0]['lr']/1.3,
     )
 
     for epoch in range(num_epochs):
