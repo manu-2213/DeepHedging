@@ -109,10 +109,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="BSM call inactive-network sweep: lr × scheduler"
     )
-    parser.add_argument("--seed",      type=int,   default=0)
-    parser.add_argument("--lr",        type=float, default=2e-5,
-                        help="Actor + inactor Adam learning rate")
-    parser.add_argument("--scheduler", type=str,   default="cosine",
+    parser.add_argument("--seed",        type=int,   default=0)
+    parser.add_argument("--lr",          type=float, default=2e-5,
+                        help="Actor Adam learning rate")
+    parser.add_argument("--inactor_lr",  type=float, default=2e-5,
+                        help="Inactor Adam learning rate (swept independently)")
+    parser.add_argument("--scheduler",   type=str,   default="cosine",
                         choices=VALID_SCHEDULERS,
                         help="LR decay strategy for the actor scheduler")
     args = parser.parse_args()
@@ -126,14 +128,16 @@ def main():
         f"hp_bsm_call_mlp"
         f"_lr{args.lr:.0e}"
         f"_{args.scheduler}"
+        f"_ilr{args.inactor_lr:.0e}"
         f"_s{args.seed}"
     )
     wandb.init(
         name=run_name,
         config={
-            "lr":        args.lr,
-            "scheduler": args.scheduler,
-            "seed":      args.seed,
+            "lr":          args.lr,
+            "inactor_lr":  args.inactor_lr,
+            "scheduler":   args.scheduler,
+            "seed":        args.seed,
         },
     )
 
@@ -217,10 +221,10 @@ def main():
         value_coef=value_coef,
     )
 
-    # ── Optimisers with the chosen learning rate ──────────────────────
+    # ── Optimisers — actor and inactor use independently swept LRs ────
     lr = args.lr
     optim_actor   = torch.optim.Adam(actor_loss_module.parameters(),   lr=lr)
-    optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=lr)
+    optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=args.inactor_lr)
 
     num_episodes    = trn_cfg.num_episodes
     policy_epochs   = trn_cfg.policy_epochs
@@ -271,7 +275,7 @@ def main():
         sub_batch_size=sub_batch_size,
         device=device,
         action_dim=action_dim,
-        initial_lr=ppo_cfg.learning_rate_ex,
+        initial_lr=args.inactor_lr,
         actor_scheduler=actor_scheduler,
     )
 
