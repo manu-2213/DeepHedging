@@ -166,7 +166,10 @@ def actor_inactor_training(
     action_dim,
     log_interval=10,
     initial_lr=None,
+    initial_actor_lr=None,
+    initial_inactor_lr=None,
     actor_scheduler=None,
+    inactor_scheduler=None,
 ):
     episode_logs = []
     global_episode_idx = 0
@@ -182,13 +185,22 @@ def actor_inactor_training(
         device,
     )
 
-    # Reset inactor LR; only reset actor LR if no external scheduler is provided
-    if initial_lr is not None:
-        if actor_scheduler is None:
-            for param_group in optim_actor.param_groups:
-                param_group['lr'] = initial_lr
+    # Backward compatibility: if legacy initial_lr is provided, use it for
+    # any side that does not have an explicit initial_*_lr override.
+    if initial_actor_lr is None:
+        initial_actor_lr = initial_lr
+    if initial_inactor_lr is None:
+        initial_inactor_lr = initial_lr
+
+    # Reset actor LR only when no external actor scheduler is provided.
+    if initial_actor_lr is not None and actor_scheduler is None:
+        for param_group in optim_actor.param_groups:
+            param_group['lr'] = initial_actor_lr
+
+    # Always allow explicit inactor LR reset before its scheduler is created/used.
+    if initial_inactor_lr is not None:
         for param_group in optim_inactor.param_groups:
-            param_group['lr'] = initial_lr
+            param_group['lr'] = initial_inactor_lr
 
     if actor_scheduler is None:
         actor_scheduler = CosineAnnealingLR(
@@ -196,11 +208,12 @@ def actor_inactor_training(
             T_max=max(1, num_epochs),
             eta_min=optim_actor.param_groups[0]['lr']/1.3,
         )
-    inactor_scheduler = CosineAnnealingLR(
-        optim_inactor,
-        T_max=max(1, num_epochs),
-        eta_min=optim_inactor.param_groups[0]['lr']/1.3,
-    )
+    if inactor_scheduler is None:
+        inactor_scheduler = CosineAnnealingLR(
+            optim_inactor,
+            T_max=max(1, num_epochs),
+            eta_min=optim_inactor.param_groups[0]['lr']/1.3,
+        )
 
     for epoch in range(num_epochs):
         # Detect which value keys the networks use (RNN vs MLP)
