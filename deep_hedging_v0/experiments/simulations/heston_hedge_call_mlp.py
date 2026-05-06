@@ -16,6 +16,7 @@ from experiments.utils.sim_config import (
     TrainingConfig
 )
 import wandb
+import argparse
 import torch
 import warnings
 import numpy as np
@@ -36,103 +37,99 @@ from torchrl.envs import GymWrapper
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 
-# --- Env Parameters ---
-train, test = train_test_split(dynamics="heston", train_size=4, market="sp500")
-params, S0, K, v0 = train
-env_cfg = EnvConfig()
-ppo_cfg = PPOConfig()
-train_cfg = TrainingConfig()
+def main():
 
-r = env_cfg.r
-maturity = env_cfg.maturity
-trap = env_cfg.trap
-num_paths = env_cfg.num_paths_heston
-num_steps = env_cfg.num_steps
-history_len = env_cfg.history_len
-input_dim = 11
-hidden_size = train_cfg.hidden_size
-action_dim = 1
-transaction_cost = env_cfg.transaction_cost
-transaction_fee_rate = env_cfg.transaction_fee_rate
+    wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--actor_learning_rate", type=float, default=PPOConfig().learning_rate)
+    args = parser.parse_args()
+    seed = args.seed
+    actor_lr = args.actor_learning_rate
+    torch.manual_seed(seed)
+
+    train, test = train_test_split(dynamics="heston", train_size=4, market="sp500")
+    params, S0, K, v0 = train
+    env_cfg = EnvConfig()
+    ppo_cfg = PPOConfig()
+    train_cfg = TrainingConfig()
+
+    r = env_cfg.r
+    maturity = env_cfg.maturity
+    trap = env_cfg.trap
+    num_paths = env_cfg.num_paths_heston
+    num_steps = env_cfg.num_steps
+    history_len = env_cfg.history_len
+    input_dim = 11
+    hidden_size = train_cfg.hidden_size
+    action_dim = 1
+    transaction_cost = env_cfg.transaction_cost
+    transaction_fee_rate = env_cfg.transaction_fee_rate
+
+    base_env = HedgeCallHeston(
+        S0=S0, K=K, r=r, v0=v0, theta=params["theta"], rho=params["rho"],
+        kappa=params["kappa"], xi=params["sigma"], maturity=maturity,
+        num_steps=num_steps, num_paths=num_paths, history_len=history_len,
+        transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate
+    )
+
+    env = GymWrapper(base_env)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    frames_per_batch = env.num_envs * num_steps
+    sub_batch_num = train_cfg.sub_batch_num
+    sub_batch_size = frames_per_batch // sub_batch_num
+
+    clip_param = ppo_cfg.clip_param
+    value_coef = ppo_cfg.value_coef
+    entropy_coeff = ppo_cfg.entropy_coeff
+    gamma = ppo_cfg.gamma
+    lmbda = ppo_cfg.lmbda
+
+    model = create_ppo_mlp_actor(
+        input_dim=input_dim, action_dim=action_dim,
+        hidden_dim=hidden_size, device=device, action_low=0.0, action_high=1.0
+    )
+    model.to(device)
+
+    advantage_module = GAE(
+        gamma=gamma,
+        lmbda=lmbda,
+        value_network=model.get_value_operator(),
+        shifted=True,
+    )
+
+    loss_module = ClipPPOLoss(
+        actor_network=model.get_policy_operator(),
+        critic_network=model.get_value_operator(),
+        clip_epsilon=clip_param,
+        entropy_coeff=entropy_coeff,
+        value_coef=value_coef,
+    )
+
+    optim = torch.optim.Adam(loss_module.parameters(), lr=actor_lr)
+
+    num_epochs = train_cfg.num_epochs
+    num_episodes = train_cfg.num_episodes
+
+    model, _ = action_training(
+        env, model, num_epochs, num_episodes, device,
+        advantage_module, loss_module, optim,
+        frames_per_batch, sub_batch_num, sub_batch_size,
+        log_frquency=1,
+    )
+
+    # Test
+    params, S0, K, v0 = test
+    base_env = HedgeCallHeston(
+        S0=S0, K=K, r=r, v0=v0, theta=params["theta"], rho=params["rho"],
+        kappa=params["kappa"], xi=params["sigma"], maturity=maturity,
+        num_steps=num_steps, num_paths=num_paths, history_len=history_len,
+        transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate
+    )
+    test_model(base_env, model, num_steps, device, plotting=True)
+    wandb.finish()
 
 
-base_env = HedgeCallHeston(
-    S0=S0, K = K, r=r, v0=v0, theta=params["theta"], rho=params["rho"],
-    kappa=params["kappa"], xi=params["sigma"], maturity=maturity,
-    num_steps=num_steps, num_paths=num_paths, history_len=history_len, 
-    transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate
-)
-
-env = GymWrapper(base_env)
-
-frames_per_batch = env.num_envs * num_steps 
-if torch.cuda.is_available():
-    print("Using the GPU")
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
-
-act_spec = env.specs["input_spec", "full_action_spec", "action"].to(device)
-
-sub_batch_num = train_cfg.sub_batch_num
-sub_batch_size = frames_per_batch // sub_batch_num
-frames_per_batch, sub_batch_size
-
-# Param for PPO
-clip_param = ppo_cfg.clip_param
-value_coef = ppo_cfg.value_coef
-entropy_coeff = ppo_cfg.entropy_coeff
-# Param for GAE
-gamma = ppo_cfg.gamma
-lmbda = ppo_cfg.lmbda
-
-wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
-
-model = create_ppo_mlp_actor(input_dim=input_dim, action_dim=action_dim,
-                             hidden_dim=hidden_size, device=device, action_low=0.0, action_high=1.0)
-
-model.to(device)
-
-advantage_module = GAE(
-    gamma=gamma,
-    lmbda=lmbda,
-    value_network=model.get_value_operator(),
-    shifted=True # make sure use this one for RNN
-)
-
-loss_module = ClipPPOLoss(
-    actor_network=model.get_policy_operator(),
-    critic_network=model.get_value_operator(),
-    clip_epsilon=clip_param,
-    entropy_coeff=entropy_coeff,
-    value_coef=value_coef,
-)
-
-optim = torch.optim.Adam(loss_module.parameters(),lr=ppo_cfg.learning_rate)
-
-num_epochs = train_cfg.num_epochs
-num_episodes = train_cfg.num_episodes
-
-model, _ = action_training(env, 
-                        model,  
-                        num_epochs,
-                        num_episodes, 
-                        device,
-                        advantage_module,
-                        loss_module,
-                        optim,
-                        frames_per_batch,
-                        sub_batch_num,
-                        sub_batch_size,
-                        log_frquency=1
-                        )
-
-# Test
-params, S0, K, v0 = test
-base_env = HedgeCallHeston(
-    S0=S0, K = K, r=r, v0=v0, theta=params["theta"], rho=params["rho"],
-    kappa=params["kappa"], xi=params["sigma"], maturity=maturity,
-    num_steps=num_steps, num_paths=num_paths, history_len=history_len,
-    transaction_cost=transaction_cost, transaction_fee_rate=transaction_fee_rate
-)
-test_model(base_env, model, num_steps, device, plotting=True)
+if __name__ == "__main__":
+    main()

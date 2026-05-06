@@ -88,6 +88,10 @@ class HedgeBase(VectorEnv, ABC):
         # Flag indicating whether current reset is a soft reset (skip pricing)
         self._is_soft_reset = False
 
+        # Diagnostic counters: check these after training to verify reset behaviour
+        self._full_reset_count = 0
+        self._soft_reset_count = 0
+
     def reset_portfolio(self):
         # Reset portfolio
         self.cash_account = np.zeros(
@@ -118,7 +122,10 @@ class HedgeBase(VectorEnv, ABC):
         
         # Only recalculate option prices on full reset
         if not self._is_soft_reset:
+            self._full_reset_count += 1
             self._calculate_option_prices()
+        else:
+            self._soft_reset_count += 1
         
         self.current_step = 0
         # Reset portfolio and cash account

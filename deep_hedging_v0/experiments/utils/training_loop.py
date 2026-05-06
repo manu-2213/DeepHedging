@@ -73,8 +73,11 @@ def action_training(env,
                 sampler=SamplerWithoutReplacement(),
             )
 
-            # compute advantages
-            advantage_module(batch)
+            # compute advantages (no_grad: advantages are fixed targets, not differentiated;
+            # without this, the LSTM stores all gate activations for backprop, consuming
+            # ~10 GB+ on large batches even though we never call .backward() on them)
+            with torch.no_grad():
+                advantage_module(batch)
 
             # store batch in replay buffer
             replay_buffer.extend(batch.reshape(-1).cpu())
@@ -144,6 +147,18 @@ def action_training(env,
             episode += 1
         scheduler.step()
         wandb.log({"learning_rate": scheduler.get_last_lr()[0]}, commit=False)
+
+        # Log reset diagnostics so we can verify soft-reset is working
+        if hasattr(base_env, '_full_reset_count'):
+            wandb.log({
+                "diagnostics/full_resets_total": base_env._full_reset_count,
+                "diagnostics/soft_resets_total": base_env._soft_reset_count,
+                "diagnostics/epoch": epoch,
+            }, commit=False)
+            print(
+                f"  [reset diagnostics] full={base_env._full_reset_count}  "
+                f"soft={base_env._soft_reset_count}"
+            )
 
     return model, scheduler
 
@@ -277,8 +292,9 @@ def actor_inactor_training(
                 if "original_action" in batch_actor.keys():
                     batch_actor.set_("action", batch_actor["original_action"])
 
-                actor_advantage_module(batch_actor)
-                inactor_advantage_module(batch_inactor)
+                with torch.no_grad():
+                    actor_advantage_module(batch_actor)
+                    inactor_advantage_module(batch_inactor)
 
                 replay_buffer_actor.extend(batch_actor.reshape(-1).cpu())
                 replay_buffer_inactor.extend(batch_inactor.reshape(-1).cpu())

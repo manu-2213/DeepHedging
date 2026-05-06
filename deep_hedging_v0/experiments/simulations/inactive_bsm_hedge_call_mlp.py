@@ -46,6 +46,10 @@ def main():
     wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--actor_learning_rate", type=float, default=PPOConfig().learning_rate)
+
+    args = parser.parse_args()
+    actor_lr = args.actor_learning_rate
 
     env_cfg = EnvConfig()
     ppo_cfg = PPOConfig()
@@ -130,7 +134,6 @@ def main():
 
     # Note: training_loop will handle setting keys for loss module
 
-    actor_lr = ppo_cfg.learning_rate
     inactor_lr = ppo_cfg.learning_rate_inactive
     optim_actor = torch.optim.Adam(actor_loss_module.parameters(), lr=actor_lr)
     optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=inactor_lr)
@@ -185,7 +188,7 @@ def main():
                     sub_batch_size=sub_batch_size,
                     device=device,
                     action_dim=action_dim,
-                    initial_actor_lr=ppo_cfg.learning_rate_ex,
+                    initial_actor_lr=actor_lr,
                     initial_inactor_lr=inactor_lr,
                     actor_scheduler=actor_scheduler,
                     inactor_scheduler=inactor_scheduler,

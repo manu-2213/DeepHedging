@@ -20,7 +20,7 @@ class EnvConfig:
     maturity: float = 1.0
     r: float = 0.01
     num_paths: int = 100
-    num_paths_heston: int = 10 # Very compute heavy
+    num_paths_heston: int = 8 # Very compute heavy
     num_steps: int = 250
     history_len: int = 1
     history_len_rnn: int = 5

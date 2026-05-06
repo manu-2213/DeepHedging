@@ -49,6 +49,7 @@ class HedgeCallBS(HedgeCall):
             transaction_fee_rate,
         )
         self.sigma = sigma
+        self._last_reset_seed = None
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -56,15 +57,25 @@ class HedgeCallBS(HedgeCall):
             (self.num_total_options, self.history_len, self.feature_dim),
             dtype=np.float32,
         )
-        self.simulator = BlackScholesSimulator(
-            self.S0,
-            self.r,
-            self.sigma,
-            self.maturity,
-            self.num_steps,
-            self.num_paths,
-            self.np_random,
-        )
+        soft_from_options = options.get("soft", False) if options else False
+        seed_unchanged = (seed is None) or (seed == self._last_reset_seed)
+        has_simulator = hasattr(self, 'simulator') and self.simulator is not None
+        soft_enabled = getattr(self, '_soft_reset_enabled', False)
+
+        if has_simulator and (soft_from_options or (seed_unchanged and soft_enabled)):
+            self._is_soft_reset = True
+            return self.post_reset()
+
+        self._is_soft_reset = False
+        self._last_reset_seed = seed
+        if not has_simulator:
+            self.simulator = BlackScholesSimulator(
+                self.S0, self.r, self.sigma, self.maturity,
+                self.num_steps, self.num_paths, self.np_random,
+            )
+        else:
+            self.simulator.generate_asset_prices()
+        self._soft_reset_enabled = True
         return self.post_reset()
 
 
@@ -113,6 +124,7 @@ class HedgeDocBS(HedgeDoc):
             transaction_fee_rate,
         )
         self.sigma = sigma
+        self._last_reset_seed = None
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -120,15 +132,25 @@ class HedgeDocBS(HedgeDoc):
             (self.num_total_options, self.history_len, self.feature_dim),
             dtype=np.float32,
         )
-        self.simulator = BlackScholesSimulator(
-            self.S0,
-            self.r,
-            self.sigma,
-            self.maturity,
-            self.num_steps,
-            self.num_paths,
-            self.np_random,
-        )
+        soft_from_options = options.get("soft", False) if options else False
+        seed_unchanged = (seed is None) or (seed == self._last_reset_seed)
+        has_simulator = hasattr(self, 'simulator') and self.simulator is not None
+        soft_enabled = getattr(self, '_soft_reset_enabled', False)
+
+        if has_simulator and (soft_from_options or (seed_unchanged and soft_enabled)):
+            self._is_soft_reset = True
+            return self.post_reset()
+
+        self._is_soft_reset = False
+        self._last_reset_seed = seed
+        if not has_simulator:
+            self.simulator = BlackScholesSimulator(
+                self.S0, self.r, self.sigma, self.maturity,
+                self.num_steps, self.num_paths, self.np_random,
+            )
+        else:
+            self.simulator.generate_asset_prices()
+        self._soft_reset_enabled = True
         return self.post_reset()
 
 
@@ -177,6 +199,7 @@ class HedgeConcBS(HedgeConc):
             transaction_fee_rate,
         )
         self.sigma = sigma
+        self._last_reset_seed = None
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -184,15 +207,25 @@ class HedgeConcBS(HedgeConc):
             (self.num_total_options, self.history_len, self.feature_dim),
             dtype=np.float32,
         )
-        self.simulator = BlackScholesSimulator(
-            self.S0,
-            self.r,
-            self.sigma,
-            self.maturity,
-            self.num_steps,
-            self.num_paths,
-            self.np_random,
-        )
+        soft_from_options = options.get("soft", False) if options else False
+        seed_unchanged = (seed is None) or (seed == self._last_reset_seed)
+        has_simulator = hasattr(self, 'simulator') and self.simulator is not None
+        soft_enabled = getattr(self, '_soft_reset_enabled', False)
+
+        if has_simulator and (soft_from_options or (seed_unchanged and soft_enabled)):
+            self._is_soft_reset = True
+            return self.post_reset()
+
+        self._is_soft_reset = False
+        self._last_reset_seed = seed
+        if not has_simulator:
+            self.simulator = BlackScholesSimulator(
+                self.S0, self.r, self.sigma, self.maturity,
+                self.num_steps, self.num_paths, self.np_random,
+            )
+        else:
+            self.simulator.generate_asset_prices()
+        self._soft_reset_enabled = True
         return self.post_reset()
 
 

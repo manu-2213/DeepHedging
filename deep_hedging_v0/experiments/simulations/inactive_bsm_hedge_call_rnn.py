@@ -45,6 +45,10 @@ def main():
     wandb.init(name=os.path.splitext(os.path.basename(__file__))[0])
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--actor_learning_rate", type=float, default=PPOConfig().learning_rate)
+
+    args = parser.parse_args()
+    actor_lr = args.actor_learning_rate
 
     env_cfg = EnvConfig()
     ppo_cfg = PPOConfig()
@@ -129,9 +133,9 @@ def main():
 
     # Note: training_loop will handle setting keys for loss module
 
-    lr = ppo_cfg.learning_rate_inactive
-    optim_actor = torch.optim.Adam(actor_loss_module.parameters(), lr=lr)
-    optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=lr)
+    inactor_lr = ppo_cfg.learning_rate_inactive
+    optim_actor = torch.optim.Adam(actor_loss_module.parameters(), lr=actor_lr)
+    optim_inactor = torch.optim.Adam(inactor_loss_module.parameters(), lr=inactor_lr)
 
     num_episodes = trn_cfg.num_episodes
     policy_epochs = trn_cfg.policy_epochs
@@ -139,7 +143,7 @@ def main():
     actor_scheduler = CosineAnnealingLR(
         optim_actor,
         T_max=max(1, policy_epochs + inaction_epochs),
-        eta_min=lr / 1.3,
+        eta_min=actor_lr / 1.3,
     )
     frames_per_batch = env.num_envs * num_steps
     sub_batch_num = trn_cfg.sub_batch_num
@@ -177,7 +181,7 @@ def main():
                     sub_batch_size=sub_batch_size,
                     device=device,
                     action_dim=action_dim,
-                    initial_lr=ppo_cfg.learning_rate_ex,
+                    initial_lr=actor_lr,
                     actor_scheduler=actor_scheduler,
                 )
     # Test

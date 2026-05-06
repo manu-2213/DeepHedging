@@ -45,7 +45,9 @@ def main():
     # 1. Fixed seed, since we're just testing locally
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--actor_learning_rate", type=float, default=PPOConfig().learning_rate)
     args = parser.parse_args()
+    actor_lr = args.actor_learning_rate
 
     seed = args.seed
     torch.manual_seed(seed)
@@ -109,7 +111,7 @@ def main():
         value_coef=value_coef,
     )
 
-    optim = torch.optim.Adam(loss_module.parameters(), lr=ppo_cfg.learning_rate)
+    optim = torch.optim.Adam(loss_module.parameters(), lr=actor_lr)
 
     num_epochs = train_cfg.num_epochs
     num_episodes = train_cfg.num_episodes
