@@ -32,10 +32,10 @@ Causes, in order of impact:
   hedging recursion is a 250-step loop of batched tensor ops on the GPU.
 * **Lean PPO**: plain torch, 4 PPO epochs over minibatches of 16k samples per rollout of
   64 paths per asset, GAE(0.99, 0.95), clip 0.1, value coef 0.1, entropy 0.001 (the old values).
-* **Early stopping**: validation CVaR95 every 5 iterations, patience 20 evaluations, best
+* **Early stopping**: validation CVaR95 every 10 iterations, patience 10 evaluations, best
   weights restored. Long-learning settings keep training; flat ones stop early.
 * **Optuna**: 30 trials per run for both nets (equal budget), TPE over log learning rates
-  (8 random start-up trials), median pruning on the validation curve after 6 trials, an 80 h
+  (8 random start-up trials), median pruning on the validation curve after 6 trials, a 180 h
   cap, journal storage so a killed job resumes where it stopped. Single net tunes 1 learning
   rate; double net tunes actor and inactor rates (joint-phase actor rate = actor rate unless
   `--tune-joint-lr`). Then 5 final seeds with the best rates.
@@ -48,12 +48,35 @@ Parity with the old environments is checked by `python -m fast_hedging.tests.tes
 Measured per-iteration cost on a laptop CPU, BSM call, 64 paths x 20 option slots:
 MLP single about 1 s, MLP double about 1.5 s, sliding-window RNN single about 45 s.
 
-**RNN only.** The grid now runs RNNs only. The default `--rnn-mode recurrent` runs the same
-2-layer LSTM once over the whole path and carries its state forward, so each step costs one
-LSTM step instead of re-running a 10-step window (roughly 10x less LSTM work; estimated, not
-measured). PPO minibatches are then whole paths, so the LSTM state is exact during updates.
-`--rnn-mode window` keeps the old sliding-window model. Nothing has been timed on a GPU;
-`smoke_test.slurm` prints seconds per iteration in its logs.
+**RNN only.** The grid runs RNNs only; the MLP simulation scripts were deleted. The default
+is the old sliding-window design with a window of 8 (`--rnn-mode window --window 8`): a
+2-layer LSTM reads observations t-7..t at every step. `--rnn-mode recurrent` runs the same LSTM
+once over the whole path instead (about 8x less LSTM work, minibatches are whole paths).
+Nothing has been timed on a GPU; `smoke_test.slurm` prints seconds per iteration.
+
+**Optimisations in this version**
+* Heston characteristic-function pricing in complex64, the precision of the original JAX code.
+* Barrier Monte Carlo updates only the inner paths that have started (half the work), with
+  larger GPU batches.
+* Validation every 10 iterations, patience 10 (the same 100-iteration stopping window as
+  before, half the validation cost).
+* cuDNN autotuning and TF32 matmuls on the GPU; larger encoder chunks.
+* Not done, because they need a test run first: `torch.compile` or CUDA graphs for the
+  250-step rollout loop, bf16 autocast for the LSTM, caching validation observations.
+
+## Information leakage audit
+No input uses information from after the decision time:
+* Market features at step t use prices at t and t-1, time to maturity and r only.
+* Agent state at t uses holdings, cash and costs up to t and the liability price at t.
+* The inaction net sees the proposed trade and its cost at prices of t.
+* The window LSTM reads t-7..t (zero padding before the start); the recurrent LSTM is
+  one-directional; the terminal observation is never fed to a policy.
+* Knock-out flags use a running prefix of the path. Nested-MC prices at t use only S_t, v_t.
+* Observation normalisation uses training-bank statistics only. Learning rates and early
+  stopping use the validation bank (different paths of the training years). The 2021 test
+  year is only used in the final report.
+* Under Heston, option prices reveal the current variance v_t. That is realistic: market
+  option prices are observable.
 
 ## Protocol kept from the old code
 * Single net: actor-critic, hidden 64. Double net: actor + inaction net, each hidden 45.
@@ -116,6 +139,24 @@ mkdir -p logs && sbatch smoke_test.slurm      # up to 4 h; check logs/ and the p
 ./submit_all.sh                               # bank build, then 12 RNN jobs (one per run)
 ```
 Outputs go to `deep_hedging_v0/experiments/results/liquid_1_5/<run>/`:
-`summary.json` (best LRs, test metrics per seed and mean/std, no-hedge and BS-delta
-baselines), `final_seed*.json`, checkpoints, `optuna.journal`, `log.txt`.
+
+| file | contents |
+|---|---|
+| `summary.json` | best LRs, trial table, seed mean/std of test metrics, baselines |
+| `trials/trial_NNN.json` | every Optuna trial (complete, pruned, failed): params, validation curve, per-iteration training log |
+| `final_seedN.json` | validation curve, per-iteration training log, test metrics |
+| `final_seedN_test_paths.npz` | per test env: P&L, cost, tracking error, hold rate, trade count; `trace_*`: step-by-step holdings, proposed trades, hold decisions and probabilities, costs, portfolio value, liability, prices for the first 100 test paths |
+| `best_trial_test_paths.npz` | the same for the best tuning trial |
+| `baselines_test_paths.npz` | per-env P&L and cost of no-hedge (and BS delta for the BSM call) |
+| `best_trial.pt`, `final_seedN.pt` | weights |
+| `optuna.journal`, `log.txt` | Optuna storage, full console log |
+
+The per-iteration training log holds rollout stats (train CVaR, P&L, cost, hold rate, trades)
+and PPO diagnostics per net (objective and value loss, entropy, approximate KL, clip fraction,
+action std or mean hold probability, explained variance).
+
+Load everything with `fast_hedging/analysis.py` (pandas):
+`load_summaries`, `load_run_summaries`, `load_trials`, `load_curves`, `load_paths`,
+`load_baselines`, and `compare_nets` for a paired single-vs-double bootstrap on identical test
+paths (resampling whole simulated paths).
 Resubmitting a run's slurm file resumes it.

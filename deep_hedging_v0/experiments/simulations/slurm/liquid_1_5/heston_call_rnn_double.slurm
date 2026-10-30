@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=96:00:00
+#SBATCH --time=240:00:00
 
 set -eo pipefail
 cd ${DEEP_HEDGING_REPO:-/data/home/acw796/DeepHedging}/deep_hedging_v0
@@ -24,7 +24,7 @@ mkdir -p experiments/simulations/slurm/liquid_1_5/logs
 # then 5 final seeds with the best rates, evaluated on the held-out test year.
 # Resumable: resubmitting this same file continues the study and skips finished seeds.
 python -u -m fast_hedging.experiment \
-    --dynamics heston --product call --arch rnn --net double \
+    --dynamics heston --product call --arch rnn --rnn-mode window --window 8 --net double \
     --underlying-fee 0.01 --option-fee 0.05 \
-    --n-trials 30 --tuning-hours 80 --final-seeds 1 2 3 4 5 \
+    --n-trials 30 --tuning-hours 180 --final-seeds 1 2 3 4 5 \
     --out experiments/results/liquid_1_5/heston_call_rnn_double

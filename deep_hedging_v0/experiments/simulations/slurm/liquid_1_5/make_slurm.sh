@@ -34,10 +34,10 @@ EOF
 FEES="--underlying-fee 0.01 --option-fee 0.05"
 for dyn in bsm heston; do
   for prod in call doc con; do
-    for arch in rnn; do   # RNN only (recurrent LSTM over the path; --rnn-mode window = old model)
+    for arch in rnn; do   # RNN only: LSTM over the last 8 observations (history_len 8)
       for net in single double; do
         name=${dyn}_${prod}_${arch}_${net}
-        wall=96:00:00; hours=80
+        wall=240:00:00; hours=180   # 180 h tuning cap leaves ~60 h for the 5 final seeds
         { header "$name" "$wall" 32G
           cat <<EOF
 
@@ -45,7 +45,7 @@ for dyn in bsm heston; do
 # then 5 final seeds with the best rates, evaluated on the held-out test year.
 # Resumable: resubmitting this same file continues the study and skips finished seeds.
 python -u -m fast_hedging.experiment \\
-    --dynamics $dyn --product $prod --arch $arch --net $net \\
+    --dynamics $dyn --product $prod --arch $arch --rnn-mode window --window 8 --net $net \\
     $FEES \\
     --n-trials 30 --tuning-hours $hours --final-seeds 1 2 3 4 5 \\
     --out experiments/results/liquid_1_5/$name
@@ -75,16 +75,28 @@ EOF
 
 # 1) parity of the fast engine against the original Gym environments
 python -u -m fast_hedging.tests.test_parity
-# 2) tiny end-to-end runs: recurrent RNN single + double, old sliding-window RNN, and a
+# 2) tiny end-to-end runs: window-8 RNN single + double, the recurrent RNN, and a
 #    Heston DOC double net (exercises Heston pricing, the barrier MC and two instruments)
-for spec in "bsm call recurrent single" "bsm call recurrent double" "bsm call window single" \
-            "heston doc recurrent double"; do
+for spec in "bsm call window single" "bsm call window double" "bsm call recurrent single" \
+            "heston doc window double"; do
   set -- \$spec
   python -u -m fast_hedging.experiment --dynamics \$1 --product \$2 --arch rnn --rnn-mode \$3 --net \$4 \\
       $FEES --train-paths 200 --val-paths 100 --test-paths 200 \\
       --n-trials 3 --final-seeds 1 --max-iters 30 --min-iters 10 --patience 3 \\
       --out experiments/results/liquid_1_5/_smoke/\$1_\$2_\$3_\$4_\$SLURM_JOB_ID
 done
+# 3) every saved artefact loads with the analysis helpers
+python - <<'PY'
+import glob
+from fast_hedging import analysis as fa
+root = "experiments/results/liquid_1_5/_smoke"
+print(fa.load_summaries(root).filter(regex="run|seed|cvar_95").to_string())
+print(len(fa.load_trials(root)), "trial rows;", len(fa.load_curves(root, "train")), "train-log rows;",
+      len(fa.load_curves(root, "eval", source="trials")), "trial eval rows")
+run = sorted(glob.glob(root + "/*_double_*"))[-1]
+print({k: v.shape for k, v in fa.load_paths(run, seed=1).items()})
+print(sorted(fa.load_baselines(run)))
+PY
 EOF
 } > smoke_test.slurm
 

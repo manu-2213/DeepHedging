@@ -1,230 +1,187 @@
-# Deep Reinforcement Learning for Delta Hedging
+<div align="center">
 
-This repository implements and compares different approaches to delta hedging, from classical Black-Scholes-Merton (BSM) to modern deep reinforcement learning methods.
+# 🛡️ DeepHedging
 
-## Project Overview
+### When should a hedger *not* trade?
 
-The project is structured in three main phases:
-1. Data Generation and Simulation Framework
-2. Classical Delta Hedging Implementation 
-3. Deep Reinforcement Learning Implementation (Coming Soon)
+**Deep reinforcement learning for option hedging under transaction costs:
+a single actor-critic against an actor + learned "inaction" network.**
 
-### Current Features
+![Python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-GPU-EE4C2C?logo=pytorch&logoColor=white)
+![Optuna](https://img.shields.io/badge/Optuna-TPE%20%2B%20pruning-2C4F7C)
+![Slurm](https://img.shields.io/badge/HPC-Slurm-0B7A75)
+![Status](https://img.shields.io/badge/status-PhD%20research-8A2BE2)
 
-#### Synthetic Data Generation
-- Geometric Brownian Motion (GBM) for multiple asset paths
-- Planned: Heston, SABR, Merton Jump, and Variance Gamma models
-- Customizable parameters for volatility, drift, and time horizon
+</div>
 
-#### Classical Delta Hedging
-- BSM option pricing and Greeks calculation
-- Dynamic delta hedging implementation
-- P&L calculation and performance metrics
-- Visualization tools for hedge performance
+---
 
-### Coming Soon: Deep Hedging
+## ✨ The idea
 
-The ultimate goal is to implement deep reinforcement learning for hedging options. This approach offers several advantages over classical methods:
+With proportional transaction costs, re-hedging every day is expensive. The best hedge
+trades only when the position has drifted far enough from where it should be.
 
-1. **Model-Free Hedging**
-   - No assumptions about underlying price dynamics
-   - Learns directly from market data
-   - Can adapt to changing market conditions
+This project asks whether a deep hedger learns that better when **"how much to hold"**
+and **"whether to trade at all"** are separate decisions:
 
-2. **Transaction Costs**
-   - Naturally incorporates transaction costs in the hedging strategy
-   - Balances hedging error vs trading costs
+| | Single net | Double net |
+|---|---|---|
+| **Networks** | one actor-critic | actor-critic **+** inaction net |
+| **Decision at each step** | new hedge position | proposed position, then *trade* or *hold* |
+| **Hold mechanism** | must output the old position exactly | Bernoulli "hold" keeps the previous hedge |
+| **Parameter budget** | hidden 64 | two nets of hidden 45 (≈ same size) |
 
-3. **Market Frictions**
-   - Handles discrete-time hedging
-   - Accounts for bid-ask spreads
-   - Manages inventory constraints
+Both are trained with PPO on simulated markets calibrated to S&P 500 options.
+They are tuned with the same Optuna budget and evaluated on a held-out year.
 
-## Tune Then Train (Current Slurm Workflow)
+---
 
-Submit the existing per-experiment Slurm files. Each job now runs 12 LR
-candidates first, saves the lowest valid CVaR95 configuration, and then
-automatically trains that configuration from scratch on seeds 1-10. No
-separate sweep submission or post-sweep submission is needed.
+## 🧪 Experiment grid
 
-| Stage | Active-only models | Inactive models |
-| --- | --- | --- |
-| 12 tuning runs, seed 0 | 36 epochs (60% of 60) | Full 40 actor + 20 joint epochs |
-| 10 final runs, seeds 1-10 | Full 60 epochs | Full 40 actor + 20 joint epochs |
+**Costs:** 1% per trade on the underlying and 5% of premium per trade on options.
 
-All runs use 400 episodes per epoch. The LR candidates are the same 12-entry
-grids documented below: active-only models vary actor LR; inactive models
-vary actor and inactor LRs independently. The actor LR is applied in both
-pretraining and joint training. The existing model initialization is repeated
-for each final seed; tuning checkpoints are not reused.
+| Dynamics | Liability to hedge | Hedging instruments | Nets |
+|---|---|---|---|
+| Black–Scholes | European call | underlying | single · double |
+| Black–Scholes | Down-and-out call | call + put | single · double |
+| Black–Scholes | Cash-or-nothing call | call + put | single · double |
+| Heston | European call | underlying | single · double |
+| Heston | Down-and-out call | call + put | single · double |
+| Heston | Cash-or-nothing call | call + put | single · double |
 
-From the repository root on the cluster, submit one experiment:
+**12 runs**, all with a 2-layer LSTM over the last 8 observations. Each run is one Slurm job.
 
-```sh
-sbatch deep_hedging_v0/experiments/simulations/slurm/inactive_bsm_hedge_call_mlp.slurm
+---
+
+## ⚙️ How a run works
+
+```mermaid
+flowchart LR
+    A[Calibrated params<br/>S&P 500, 2017–2021] --> B[Market bank<br/>paths + all prices<br/>built once, cached]
+    B --> C{Optuna study<br/>30 trials}
+    C -->|trial| D[PPO training<br/>early stopping on<br/>validation CVaR95]
+    D -->|score| C
+    C --> E[Best learning rates]
+    E --> F[5 final seeds]
+    F --> G[Test on 2021<br/>held-out year]
+    G --> H[summary.json]
 ```
 
-Or submit all 24 (this does not impose a global concurrency limit):
+* **Train / validation:** different simulated paths of the 2017–2020 calibrations.
+* **Test:** the 2021 calibration. It is never used for tuning or early stopping.
+* **Objective:** per-step tracking error `-|portfolio − liability|`, scaled by the premium.
+* **Reported:** CVaR95 / VaR / mean / std of terminal P&L, costs paid, and hold rate. Results
+  are given against no-hedge and Black–Scholes delta-hedge baselines.
 
-```sh
-for job in deep_hedging_v0/experiments/simulations/slurm/*hedge*.slurm; do
-   sbatch "$job"
-done
+### What the agent sees
+| Input | Single net | Double net |
+|---|:-:|:-:|
+| Price and option-price changes, moneyness, time to maturity (last 8 steps) | ✅ | ✅ |
+| Current holdings (the last executed hedge) | ✅ | ✅ |
+| Tracking error so far, costs paid so far, steps since last trade | ✅ | ✅ |
+| Proposed trade and what it would cost (inaction net only) | — | ✅ |
+
+Every input is known at decision time. Nothing comes from the future of the path or from
+the test year (see the [leakage audit](deep_hedging_v0/fast_hedging/NOTES.md#information-leakage-audit)).
+
+---
+
+## 🚀 Quickstart (HPC)
+
+```bash
+# 1. environment
+module load python/3.11.7-gcc-12.2.0
+python -m venv .venv && source .venv/bin/activate
+pip install -r deep_hedging_v0/requirements.txt
+
+# 2. smoke test: parity with the original environments + tiny end-to-end runs
+cd deep_hedging_v0/experiments/simulations/slurm/liquid_1_5
+mkdir -p logs && sbatch smoke_test.slurm
+
+# 3. the full grid: builds market banks, then 12 runs (one job each)
+bash submit_all.sh
 ```
 
-Both stages force W&B online; authenticate the cluster environment before
-submission. The launchers use their original module-loading and `.venv`
-activation commands. They do not install or upgrade any packages. Training
-subprocesses preserve inherited `PYTHONPATH`, `PYTHONHOME`, and other module
-environment settings, and run from the repository root as the original
-direct commands did. `WANDB_PROJECT` is inherited when set; otherwise W&B
-uses its existing configuration/default behavior.
-Runs are grouped by experiment and Slurm job ID, with
-job types `tuning` and `final` and tags showing phase, seed and LRs. Training
-output streams live to Slurm stdout and individual log files. Final runs
-save model/plot artifacts; tuning runs do not.
+Run a single experiment by hand:
 
-Each job saves `runs.csv`, `best_config.json`, and per-run logs under
-`deep_hedging_v0/experiments/hp_tuning/results/<experiment>_<job-id>/`.
-The winning config is saved before final training starts. Invalid/failed
-tuning candidates cannot win; if all fail, final training does not start.
-All ten final seeds are attempted, and the job exits nonzero if any fail.
-
-The existing 240-hour allocation now covers 22 sequential runs; adjust
-walltime if needed within cluster limits. Already-running jobs retain their
-submitted scripts. Do not submit the legacy sweep arrays as well unless you
-intend to repeat tuning. CVaR selection uses the existing test split as
-validation data; reserve independent data for final outperformance claims.
-
-## Legacy Standalone Learning-Rate Search
-
-Run these commands from the repository root using the Python environment with
-the project dependencies installed:
-
-```sh
-python deep_hedging_v0/experiments/hp_tuning/sweep_learning_rates.py --dry-run
-python deep_hedging_v0/experiments/hp_tuning/sweep_learning_rates.py --output learning_rate_sweep.csv
+```bash
+cd deep_hedging_v0
+python -m fast_hedging.experiment \
+    --dynamics heston --product doc --arch rnn --rnn-mode window --window 8 --net double \
+    --underlying-fee 0.01 --option-fee 0.05 \
+    --n-trials 30 --out experiments/results/heston_doc_rnn_double
 ```
 
-The sweep covers all 24 scripts in `deep_hedging_v0/experiments/simulations`:
-BSM/Heston, call/concentration/DOC, MLP/RNN, active/inactive. Each experiment
-gets exactly 12 configurations, for 288 training runs in total.
+Jobs can be resumed: resubmitting the same Slurm file continues the Optuna study and skips
+finished seeds.
 
-| Model | Actor learning rates | Inactor learning rates |
-| --- | --- | --- |
-| Inactive MLP | `2.5e-5`, `5e-5`, `1e-4` | `1e-4`, `3e-4`, `1e-3`, `3e-3` |
-| Inactive RNN | `2.5e-6`, `5e-6`, `1e-5` | `1e-4`, `3e-4`, `1e-3`, `3e-3` |
+---
 
-Inactive models use the full 3-by-4 Cartesian grid, including the current
-default pair. The selected actor LR applies during both actor pretraining
-and joint training; the inactor LR is independent. Active models have no
-inactor, so they test 12 distinct actor rates: multipliers
-`0.25, 0.4, 0.5, 0.65, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.5, 3` around
-`5e-5` (MLP) or `5e-6` (RNN).
+## ⚡ Why it is fast
 
-Defaults preserve 60 active epochs versus 40 actor-pretraining + 20 joint
-epochs, with 400 episodes per epoch and training seed 0. Epoch counts match,
-but optimizer-update counts and runtime need not match. Override budgets with
-`--epochs`, `--policy-epochs`, `--inaction-epochs`, and `--episodes`; unequal
-total epochs produce a warning. `--seed` sets the training seed explicitly
-for every script. Existing evaluation uses seed 0 independently.
+The first version stepped a Gym environment through TorchRL. It re-priced every option each
+epoch and ran 22 fixed-length trainings back to back in each job. The current engine:
 
-The CSV is flushed after each trial and records rates, budgets, seed, final
-CVaR95, exit status, and a log path. Full trial logs are placed beside the CSV
-in a `.logs` directory. Existing CSV files are never overwritten; choose a
-new output for another run. W&B and model/plot artifact saving are disabled.
-Use `--scripts bsm_hedge_call_mlp.py inactive_bsm_hedge_call_mlp.py` to select
-a matched subset. The console reports each best valid trial and the paired
-active-minus-inactive CVaR difference: positive means inactive performed better.
-Failed trials and missing/non-finite metrics cannot win.
+* **Prices once.** Paths and all option prices are cached per (model, product, split).
+  Heston pricing is batched on the GPU, not looped point by point.
+* **Hedges in tensors.** All paths step together on the GPU, with no Gym loop or
+  NumPy round-trips.
+* **Learns more per sample.** It runs 4 PPO epochs of minibatch updates per rollout,
+  not one pass of 4 updates.
+* **Stops when learning flattens.** Training stops after 100 iterations without improvement
+  on validation. Optuna also stops weak trials early.
 
-This is a validation search, not evidence that inactive models outperform:
-the scripts' existing test split becomes validation data when used to select
-LRs. Reserve fresh held-out data for final reporting, and confirm the chosen
-configurations across seeds. Inactive ranking uses the existing primary
-evaluation (deterministic actor, stochastic inactor), not whichever evaluation
-mode happens to score best.
+Its prices, features, rewards and P&L are checked against the original environments by
+`python -m fast_hedging.tests.test_parity`.
 
-Run the lightweight sweep tests without importing the ML stack:
+---
 
-```sh
-PYTHONPATH=deep_hedging_v0 python -m unittest experiments.hp_tuning.test_sweep_learning_rates
+## 📁 Repository layout
+
+```
+deep_hedging_v0/
+├── fast_hedging/            # ⚡ current engine (PyTorch)
+│   ├── market.py            #   simulation + cached market banks
+│   ├── pricing.py           #   vectorised BS / Heston pricing, barrier Monte Carlo
+│   ├── features.py          #   observation features
+│   ├── networks.py          #   LSTM actor-critic, inaction net
+│   ├── ppo.py               #   vectorised environment, PPO, evaluation, early stopping
+│   ├── experiment.py        #   Optuna study → final seeds → test report
+│   ├── tests/test_parity.py #   equivalence with the original environments
+│   └── NOTES.md             #   design notes, bug log, leakage audit
+├── hedging/                 # original Gym environments and simulators
+└── experiments/
+    ├── option_parameter_estimation/   # BS and Heston calibration to S&P 500 options
+    ├── simulations/slurm/liquid_1_5/  # 🎯 one Slurm file per run
+    └── simulations/slurm/old_pipeline # archived TorchRL jobs
 ```
 
-### Legacy Sweep Array Submission
+---
 
-On the cluster, from the repository root:
+## 📊 Results
 
-```sh
-sbatch deep_hedging_v0/experiments/hp_tuning/slurm/bsm_lr_search.slurm
-sbatch deep_hedging_v0/experiments/hp_tuning/slurm/heston_lr_search.slurm
-```
+> 🚧 Runs in progress. This table will be filled from each run's `summary.json`.
 
-Each array has six tasks: `0=call_mlp`, `1=call_rnn`, `2=con_mlp`,
-`3=con_rnn`, `4=doc_mlp`, `5=doc_rnn`. Each task runs the active and inactive
-versions sequentially, with 12 configurations each. Together the arrays run
-all 288 trials, using seed 0 (no extra seed loop). Each array permits two
-concurrent tasks, so submitting both uses at most four GPUs.
+| Dynamics | Product | Single net CVaR95 ↓ | Double net CVaR95 ↓ | Hold rate | BS delta CVaR95 |
+|---|---|:-:|:-:|:-:|:-:|
+| BSM | call | – | – | – | – |
+| BSM | DOC | – | – | – | – |
+| BSM | CoN | – | – | – | – |
+| Heston | call | – | – | – | – |
+| Heston | DOC | – | – | – | – |
+| Heston | CoN | – | – | – | – |
 
-Resources and modules match the existing cluster scripts: account
-`pilot_sae_gpu`, partition `sae`, one GPU, 12 CPUs, 240 GB RAM and a 240-hour
-walltime per task. Python comes from the cluster repository's `.venv`.
-The default repository location is `/data/home/acw796/DeepHedging`; set
-`DEEP_HEDGING_REPO` before submission to override it. Set `SWEEP_SEED` to
-override the training seed. Path counts are fixed at 50 for BSM and 10 for
-Heston, with four minibatches, to avoid inheriting local smoke-test settings.
+---
 
-Results and full trial logs are grouped under
-`deep_hedging_v0/experiments/hp_tuning/results/lr_search_<array-job-id>/`,
-with one CSV per active/inactive pair. Slurm stdout/stderr use the job name,
-array job ID and task ID in the submission directory. The end of each stdout
-file reports both best configurations and their CVaR comparison.
+## 📚 Background
 
-For a cluster dry run, append `--dry-run` to either `sbatch` command. To run
-only a selected pair, override the array, for example `sbatch --array=0 ...`.
-To change concurrency, use `sbatch --array=0-5%1 ...`. Cancel an array with
-`scancel <array-job-id>`. These launchers have not been submitted locally.
+* Buehler, Gonon, Teichmann, Wood (2019). *Deep hedging*. Quantitative Finance.
+* Whalley & Wilmott (1997). *An asymptotic analysis of an optimal hedging model for
+  option pricing with transaction costs*. Mathematical Finance.
+* Schulman et al. (2017). *Proximal Policy Optimization Algorithms*.
+* Heston (1993). *A closed-form solution for options with stochastic volatility*.
 
-### Run the Selected Learning Rates
-
-As soon as an experiment finishes its 12 trials, the sweep saves its lowest
-valid CVaR95 configuration in a `.best` directory beside the CSV. Each
-experiment gets two files:
-
-- `<experiment>.json`: actor/inactor/joint LRs, selected trial and CVaR,
-   valid/attempted trial counts, training seed, training budgets, path counts,
-   minibatch count, and source CSV.
-- `<experiment>.slurm`: a ready-to-submit training job with those same LRs
-   and budgets. Actor CLI arguments and config-only overrides are both handled;
-   the selected actor LR also applies during joint training.
-
-For example, after the BSM call MLP pair completes (replace `12345` with
-the sweep's array job ID):
-
-```sh
-results=deep_hedging_v0/experiments/hp_tuning/results/lr_search_12345
-sbatch "$results/bsm_hedge_call_mlp.best/bsm_hedge_call_mlp.slurm"
-sbatch "$results/bsm_hedge_call_mlp.best/inactive_bsm_hedge_call_mlp.slurm"
-```
-
-To submit every saved winner from that array:
-
-```sh
-for job in "$results"/*.best/*.slurm; do
-      sbatch "$job"
-done
-```
-
-Each generated job trains once, defaulting to the sweep seed. For a new seed,
-use `sbatch --export=ALL,RUN_SEED=1 <generated-job.slurm>`. Jobs re-enable
-checkpoint/plot saving and default to online W&B (configure cluster W&B
-credentials beforehand, or export `WANDB_MODE=offline`). They use the same
-cluster resource/module settings as the search jobs and support
-`DEEP_HEDGING_REPO` if the repository has moved.
-
-Exports are isolated by CSV/array job, so parallel tasks cannot overwrite
-each other's winners. A completed experiment's exports survive interruption
-of a later experiment. No winner is generated if every trial failed; JSON
-records the valid-trial count when only some succeeded. These files contain
-selected hyperparameters, not trained weights: submitting a generated job
-retrains the model without repeating the LR search.
+<div align="center">
+<sub>PhD research project · Queen Mary University of London</sub>
+</div>

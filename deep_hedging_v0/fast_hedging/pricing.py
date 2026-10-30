@@ -86,33 +86,35 @@ def _heston_cf(phi, x, T, v, kappa, theta, rho, xi, r, u):
 
 
 def heston_probabilities(S, v, T, params, strikes, r, *, n_points=1000, phi_max=50.0,
-                         device="cpu", chunk=2048):
+                         device="cpu", chunk=4096):
     """Heston P1/P2 for every point and every strike.
 
     S, v, T: (n,) arrays (one entry per (path, asset, time) point) and
     params: dict of (n,) arrays kappa/theta/rho/xi. strikes: (n, M).
     Returns P1, P2 as numpy float64 arrays of shape (n, M).
+    Computed in complex64, the precision of the original JAX code (x64 disabled):
+    much faster than complex128 on GPUs with weak float64 throughput.
     The characteristic function does not depend on the strike, so it is
     evaluated once per point and reused for all M strikes.
     """
-    dt64 = torch.float64
-    phi = torch.linspace(1e-8, phi_max, n_points, dtype=dt64, device=device)
+    f32 = torch.float32
+    phi = torch.linspace(1e-8, phi_max, n_points, dtype=f32, device=device)
     dx = float(phi[1] - phi[0])
     n, M = strikes.shape
     P1 = np.empty((n, M)); P2 = np.empty((n, M))
     for lo in range(0, n, chunk):
         hi = min(n, lo + chunk)
-        col = lambda a: torch.as_tensor(np.asarray(a[lo:hi], np.float64), device=device)[:, None]
+        col = lambda a: torch.as_tensor(np.asarray(a[lo:hi], np.float32), device=device)[:, None]
         x, TT, vv = torch.log(col(S)), col(T), torch.clamp(col(v), min=0.0)
         k, th, rh, xi = col(params["kappa"]), col(params["theta"]), col(params["rho"]), col(params["xi"])
-        logK = torch.log(torch.as_tensor(np.asarray(strikes[lo:hi], np.float64), device=device))
+        logK = torch.log(torch.as_tensor(np.asarray(strikes[lo:hi], np.float32), device=device))
         for u, out in ((0.5, P1), (-0.5, P2)):
             cf = _heston_cf(phi, x, TT, vv, k, th, rh, xi, r, u) / (1j * phi)   # (c, F)
             # integrand for each strike: Re(exp(-i phi lnK) cf / (i phi))
             ph = torch.exp(-1j * phi[None, None, :] * logK[:, :, None])         # (c, M, F)
-            integrand = torch.real(ph * cf[:, None, :]).to(torch.float32).to(dt64)
+            integrand = torch.real(ph * cf[:, None, :])
             integral = torch.trapezoid(integrand, dx=dx, dim=-1)
-            out[lo:hi] = (0.5 + integral / math.pi).cpu().numpy()
+            out[lo:hi] = (0.5 + integral / math.pi).double().cpu().numpy()
     return P1, P2
 
 
@@ -154,7 +156,7 @@ def heston_put_from_call(call, S_paths, strikes, T_grid, r):
 
 
 def heston_down_out_call(S_paths, V_paths, T_grid, params_asset, r, K, H, vanilla, *,
-                         mc_paths=500, seed=0, device="cpu", outer_chunk=64):
+                         mc_paths=500, seed=0, device="cpu", outer_chunk=256):
     """Nested-MC down-and-out call, same estimator as HestonSimulator.down_out_call.
 
     Speed-ups versus the original: (1) all start times are simulated in one
@@ -185,19 +187,16 @@ def heston_down_out_call(S_paths, V_paths, T_grid, params_asset, r, K, H, vanill
             S = S0[:, None, :].expand(c, mc_paths, N).clone()
             v = torch.clamp(v0, min=0.0)[:, None, :].expand(c, mc_paths, N).clone()
             run_min = S.clone()
-            starts = torch.arange(N, device=device)
-            for s in range(1, N + 1):
-                active = (starts < s)[None, None, :]          # start t moves at clock s if t < s
+            for s_ in range(1, N + 1):
+                # at clock s_ only inner paths started at t < s_ move: update the slice [:s_]
                 z_s = torch.randn(c, mc_paths, 1, generator=gen, device=device, dtype=ftype)
                 z_v = torch.randn(c, mc_paths, 1, generator=gen, device=device, dtype=ftype)
                 z_v = rh * z_s + math.sqrt(1.0 - rh**2) * z_v
-                v_pos = torch.clamp(v, min=0.0)
+                v_pos = torch.clamp(v[..., :s_], min=0.0)
                 sq = torch.sqrt(v_pos * dt)
-                S_new = S * torch.exp((r - 0.5 * v_pos) * dt + sq * z_s)
-                v_new = v + kap * (th - v_pos) * dt + xi * sq * z_v
-                S = torch.where(active, S_new, S)
-                v = torch.where(active, v_new, v)
-                run_min = torch.where(active, torch.minimum(run_min, S), run_min)
+                S[..., :s_] *= torch.exp((r - 0.5 * v_pos) * dt + sq * z_s)
+                v[..., :s_] += kap * (th - v_pos) * dt + xi * sq * z_v
+                run_min[..., :s_] = torch.minimum(run_min[..., :s_], S[..., :s_])
             S64, mn = S.double(), run_min.double()
             for m in range(M):
                 pay = torch.clamp(S64 - Kt[a, m], min=0.0) * (mn > Ht[a, m])

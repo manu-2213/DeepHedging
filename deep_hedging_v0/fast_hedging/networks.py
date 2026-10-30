@@ -26,7 +26,7 @@ class Encoder(nn.Module):
 
     'mlp'       : 2-layer MLP on the current observation, input (n, F) -> (n, h).
     'window'    : 2-layer LSTM over a sliding window of the last W observations,
-                  re-run from scratch at every step (the old history_len=10 model),
+                  re-run from scratch at every step (the old history_len model; default W=8),
                   input (n, W, F) -> (n, h).
     'recurrent' : 2-layer LSTM run once over the whole path with its hidden state
                   carried forward, input (n, T, F) -> (n, T, h). Same network as

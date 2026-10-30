@@ -39,9 +39,9 @@ class TrialPruned(Exception):
 @dataclass
 class TrainConfig:
     arch: str = "rnn"                 # rnn | mlp
-    rnn_mode: str = "recurrent"       # recurrent (LSTM over the whole path) | window (old sliding window)
+    rnn_mode: str = "window"          # window: LSTM over the last `window` steps | recurrent: whole path
     net: str = "single"               # single | double
-    window: int = 10                  # sliding-window length for rnn_mode=window (old history_len_rnn)
+    window: int = 8                   # history_len: observations the window LSTM sees (t-7..t)
     hidden: int = 64
     underlying_fee: float = 0.01
     option_fee: float = 0.05
@@ -61,8 +61,9 @@ class TrainConfig:
     ppo_epochs: int = 4
     minibatch: int = 16384            # samples per gradient step (recurrent: minibatch // N whole paths)
     actor_update_every: int = 3       # joint phase: actor updated every k-th iteration (old protocol)
-    eval_every: int = 5               # iterations between validation evaluations
-    patience: int = 20                # evaluations without improvement before stopping
+    eval_every: int = 10              # iterations between validation evaluations (a full validation
+                                      # rollout costs several training rollouts with the window LSTM)
+    patience: int = 10                # evaluations without improvement (= 100 iterations) before stopping
     min_rel_improvement: float = 1e-3
     max_iters: int = 3000             # per phase
     min_iters: int = 50
@@ -175,7 +176,7 @@ class Agent:
             self.inactor.load_state_dict(sd["inactor"])
 
 
-def _encode_all(encoder, task, obs, B, N, chunk=65536):
+def _encode_all(encoder, task, obs, B, N, chunk=131072):
     """Encoder features for every (env, t<N), no grad. Returns (B, N, h)."""
     if encoder.sequential:
         c = max(1, chunk // N)
@@ -188,7 +189,8 @@ def _encode_all(encoder, task, obs, B, N, chunk=65536):
 
 @torch.no_grad()
 def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=True, inactor_stochastic=None,
-            record=True, gen=None):
+            record=True, gen=None, trace=False):
+    """trace=True also returns per-step trajectories (for analysis; keep B small)."""
     if inactor_stochastic is None:
         inactor_stochastic = actor_stochastic
     cfg, N, B = agent.cfg, task.N, data["B"]
@@ -214,6 +216,13 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
                 rec["xi"] = z(inactor_state_dim(A))
     abs_err = torch.zeros(B, device=dev)
     holds = torch.zeros(B, device=dev)
+    n_trades = torch.zeros(B, device=dev)
+    tr = None
+    if trace:
+        zt = lambda *s: torch.zeros(B, N, *s, device=dev)
+        tr = {"position": zt(A), "proposed": zt(A), "hold": zt(), "hold_prob": zt(), "cost": zt(),
+              "tracking_error": zt(), "portfolio_value": torch.zeros(B, N + 1, device=dev)}
+        tr["portfolio_value"][:, 0] = pv
     for t in range(N):
         xa = None
         if cfg.agent_state:
@@ -254,11 +263,21 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
                     rec["xi"][:, t] = xi
         traded = (trade.abs().amax(-1) > 1e-6).float()
         since = (since + 1.0) * (1.0 - traded)
+        n_trades += traded
+        if trace:
+            tr["position"][:, t], tr["proposed"][:, t], tr["cost"][:, t] = final, a, cost
+            tr["tracking_error"][:, t] = pv - L[:, t + 1]
+            tr["portfolio_value"][:, t + 1] = pv
+            if use_inactor:
+                tr["hold"][:, t], tr["hold_prob"][:, t] = hold, idist.probs
         abs_err += err
         cum_cost += cost
         pos = final
     pnl = pv - L[:, N]
-    return rec, {"pnl": pnl, "abs_err": abs_err / N, "cost": cum_cost, "hold_rate": holds / N}
+    out = {"pnl": pnl, "abs_err": abs_err / N, "cost": cum_cost, "hold_rate": holds / N, "n_trades": n_trades}
+    if trace:
+        out["trace"] = tr
+    return rec, out
 
 
 def gae(reward, value, gamma, lmbda):
@@ -330,7 +349,9 @@ def update(agent: Agent, task: Task, data, rec, *, which, opt, gen=None):
     u = flat(rec["u"])
     hold = flat(rec["hold"]) if "hold" in rec else None
     params = list(model.parameters())
-    stats = []
+    stats = {k: [] for k in ("loss_objective", "loss_value", "entropy", "approx_kl", "clip_fraction",
+                             "policy_spread", "explained_variance")}
+    var_ret = float(ret.var().clamp_min(1e-12))
     for j, feat in _minibatches(model, task, data["obs"], B, N, cfg, gen):
         dist, v = model.heads(feat, None if state is None else state[j])
         logp = dist.log_prob(u[j]) if which == "actor" else dist.log_prob(hold[j])
@@ -346,8 +367,16 @@ def update(agent: Agent, task: Task, data, rec, *, which, opt, gen=None):
         loss_v = cfg.value_coef * F.smooth_l1_loss(v, ret[j])
         loss_e = -cfg.entropy_coef * dist.entropy().mean()
         _ppo_step(opt, params, loss_obj + loss_v + loss_e, cfg.max_grad_norm)
-        stats.append(float(loss_obj.detach()))
-    return float(np.mean(stats)) if stats else float("nan")
+        with torch.no_grad():
+            log_ratio = logp - logp_old[j]
+            spread = dist.scale.mean() if which == "actor" else dist.probs.mean()   # action std / mean hold prob
+            for k, val in (("loss_objective", loss_obj), ("loss_value", loss_v), ("entropy", dist.entropy().mean()),
+                         ("approx_kl", _masked_mean(torch.exp(log_ratio) - 1 - log_ratio, m)),
+                         ("clip_fraction", _masked_mean(((ratio - 1).abs() > cfg.clip).float(), m)),
+                         ("policy_spread", spread),
+                         ("explained_variance", 1 - (ret[j] - v).var() / var_ret)):
+                stats[k].append(val.detach())
+    return {k: float(torch.stack(v).mean()) if v else float("nan") for k, v in stats.items()}
 
 
 # --------------------------------------------------------------------------
@@ -369,7 +398,7 @@ def evaluate(agent: Agent, task: Task, *, use_inactor, actor_stochastic=False, i
     inactor_stochastic=True reproduces the old 'stochastic inaction' report (actor still deterministic)."""
     stochastic = actor_stochastic or inactor_stochastic
     gen = torch.Generator(device=task.device).manual_seed(seed) if stochastic else None
-    outs = {k: [] for k in ("pnl", "abs_err", "cost", "hold_rate")}
+    outs = {k: [] for k in ("pnl", "abs_err", "cost", "hold_rate", "n_trades")}
     for lo in range(0, task.P, agent.cfg.eval_chunk_paths):
         idx = torch.arange(lo, min(task.P, lo + agent.cfg.eval_chunk_paths), device=task.device)
         _, o = rollout(agent, task, task.batch(idx), use_inactor=use_inactor, actor_stochastic=actor_stochastic,
@@ -379,25 +408,31 @@ def evaluate(agent: Agent, task: Task, *, use_inactor, actor_stochastic=False, i
     arr = {k: torch.cat(v).numpy() for k, v in outs.items()}
     m = risk_metrics(arr["pnl"])
     m.update({"mean_abs_tracking_error": float(arr["abs_err"].mean()), "mean_cost": float(arr["cost"].mean()),
-              "hold_rate": float(arr["hold_rate"].mean())})
-    return m, arr["pnl"]
+              "hold_rate": float(arr["hold_rate"].mean()), "mean_trades": float(arr["n_trades"].mean())})
+    return m, arr          # arr: per-env numpy arrays in (path, asset, strike) order
 
 
 # --------------------------------------------------------------------------
 # Training phases with early stopping
 # --------------------------------------------------------------------------
 def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_inactor=None, seed=0,
-                report=None, step_offset=0, log=print):
+                report=None, step_offset=0, log=print, iter_offset=0, logs=None):
     """phase 'actor': train the actor alone (the single net, or stage 1 of the double net).
     phase 'joint': train actor+inactor together (stage 2 of the double net).
     Stops when the validation metric has not improved for `patience` evaluations
-    and restores the best weights. Returns (best_metric, best_val_metrics, history)."""
+    and restores the best weights.
+    Returns (best_metric, best_val_metrics, logs); logs["eval"] has one entry per
+    validation check, train_log one entry per iteration (rollout stats + PPO diagnostics).
+    If `logs` = {"eval": [...], "train": [...]} is given, entries are appended there as they
+    happen, so they survive a pruned or crashed trial."""
     cfg = agent.cfg
     use_inactor = phase == "joint"
     gen = torch.Generator(device=train.device).manual_seed(seed)
     opt_a = torch.optim.Adam(agent.actor.parameters(), lr=lr_actor)
     opt_i = torch.optim.Adam(agent.inactor.parameters(), lr=lr_inactor) if use_inactor else None
-    best, best_state, best_metrics, bad, history = math.inf, agent.state_dict(), None, 0, []
+    logs = logs if logs is not None else {"eval": [], "train": []}
+    history, train_log = logs["eval"], logs["train"]
+    best, best_state, best_metrics, bad = math.inf, agent.state_dict(), None, 0
     k = min(cfg.paths_per_iter, train.P)
     t0 = time.time()
     n_eval = 0
@@ -405,10 +440,19 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
         idx = torch.randperm(train.P, device=train.device, generator=gen)[:k]
         data = train.batch(idx)
         rec, out = rollout(agent, train, data, use_inactor=use_inactor, actor_stochastic=True, gen=gen)
+        entry = {"iter": it, "global_iter": iter_offset + it, "phase": phase,
+                 "train_cvar_95": risk_metrics(out["pnl"].cpu().numpy())["cvar_95"],
+                 "train_mean_pnl": float(out["pnl"].mean()), "train_abs_err": float(out["abs_err"].mean()),
+                 "train_cost": float(out["cost"].mean()), "train_hold_rate": float(out["hold_rate"].mean()),
+                 "train_trades": float(out["n_trades"].mean()), "train_reward": float(rec["reward"].sum(1).mean())}
         if use_inactor:
-            update(agent, train, data, rec, which="inactor", opt=opt_i, gen=gen)
+            for key, val_ in update(agent, train, data, rec, which="inactor", opt=opt_i, gen=gen).items():
+                entry[f"inactor_{key}"] = val_
         if not use_inactor or cfg.actor_update_every == 1 or it % cfg.actor_update_every == 1:
-            update(agent, train, data, rec, which="actor", opt=opt_a, gen=gen)
+            for key, val_ in update(agent, train, data, rec, which="actor", opt=opt_a, gen=gen).items():
+                entry[f"actor_{key}"] = val_
+        entry["elapsed_s"] = time.time() - t0
+        train_log.append(entry)
         if it % cfg.eval_every == 0:
             n_eval += 1
             m, _ = evaluate(agent, val, use_inactor=use_inactor)
@@ -416,12 +460,14 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
             if not math.isfinite(metric):
                 log(f"  [{phase}] non-finite validation metric at iter {it}; stopping")
                 break
-            history.append({"iter": it, "phase": phase, "train_abs_err": float(out["abs_err"].mean()),
+            history.append({"iter": it, "global_iter": iter_offset + it, "phase": phase,
+                            "train_abs_err": float(out["abs_err"].mean()),
                             **{f"val_{a}": b for a, b in m.items()}, "elapsed_s": time.time() - t0})
             if metric < best - cfg.min_rel_improvement * abs(best if math.isfinite(best) else metric):
                 best, best_state, best_metrics, bad = metric, agent.state_dict(), m, 0
             else:
                 bad += 1
+            history[-1]["best_so_far"], history[-1]["bad_evals"] = best, bad
             log(f"  [{phase}] it {it:5d}  val {cfg.metric}={metric:.4f}  best={best:.4f}  "
                 f"hold={m['hold_rate']:.3f}  cost={m['mean_cost']:.2f}  bad={bad}/{cfg.patience}  "
                 f"{(time.time() - t0) / it:.2f}s/it")
@@ -430,7 +476,32 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
             if bad >= cfg.patience and it >= cfg.min_iters:
                 break
     agent.load_state_dict(best_state)
-    return best, best_metrics, history
+    return best, best_metrics, logs
+
+
+@torch.no_grad()
+def trace_rollout(agent: Agent, task: Task, n_paths, *, use_inactor, inactor_stochastic=False, seed=0):
+    """Step-by-step trajectories on the first `n_paths` paths (all assets/strikes), as numpy."""
+    idx = torch.arange(min(n_paths, task.P), device=task.device)
+    gen = torch.Generator(device=task.device).manual_seed(seed) if inactor_stochastic else None
+    data = task.batch(idx)
+    _, out = rollout(agent, task, data, use_inactor=use_inactor, actor_stochastic=False,
+                     inactor_stochastic=inactor_stochastic, record=False, gen=gen, trace=True)
+    res = {f"trace_{k}": v.cpu().numpy() for k, v in out.pop("trace").items()}
+    res.update({f"trace_{k}": v.cpu().numpy() for k, v in out.items()})        # per-env totals
+    k = idx.numel()
+    res["trace_liability"] = data["L"].cpu().numpy()                             # (B, N+1)
+    res["trace_instrument_prices"] = data["X"].cpu().numpy()                     # (B, N+1, I)
+    res["trace_spot"] = (task.S[idx][:, :, None, :].expand(k, task.A, task.M, task.N1)
+                         .reshape(-1, task.N1).cpu().numpy())                    # (B, N+1)
+    return res
+
+
+def env_index(task: Task):
+    """(path, asset, strike, K) of every env in the (path, asset, strike) flattening order."""
+    p, a, m = np.meshgrid(np.arange(task.P), np.arange(task.A), np.arange(task.M), indexing="ij")
+    K = task.K.cpu().numpy()[a, m]
+    return {"env_path": p.ravel(), "env_asset": a.ravel(), "env_strike": m.ravel(), "env_K": K.ravel()}
 
 
 # --------------------------------------------------------------------------
@@ -470,6 +541,7 @@ def evaluate_baseline(task: Task, kind: str, chunk=256):
         pv = cash + (pos * X[:, task.N]).sum(-1)
         pnls.append((pv - L[:, task.N]).cpu()); costs.append(cost_tot.cpu())
     pnl = torch.cat(pnls).numpy()
+    cost = torch.cat(costs).numpy()
     m = risk_metrics(pnl)
-    m["mean_cost"] = float(torch.cat(costs).mean())
-    return m
+    m["mean_cost"] = float(cost.mean())
+    return m, {"pnl": pnl, "cost": cost}

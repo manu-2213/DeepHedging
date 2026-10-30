@@ -28,7 +28,8 @@ import numpy as np
 import torch
 
 from .market import MarketSpec, get_bank, default_device
-from .ppo import Agent, Task, TrainConfig, TrialPruned, evaluate, evaluate_baseline, train_phase
+from .ppo import (Agent, Task, TrainConfig, TrialPruned, env_index, evaluate, evaluate_baseline, trace_rollout,
+                  train_phase)
 
 SPLIT_SEEDS = {"train": 101, "val": 202, "test": 303}       # identical for every experiment
 DEFAULT_PATHS = {"bsm": {"train": 2000, "val": 500, "test": 2000},
@@ -40,8 +41,9 @@ def parse_args(argv=None):
     p.add_argument("--dynamics", choices=("bsm", "heston"), required=True)
     p.add_argument("--product", choices=("call", "doc", "con"), required=True)
     p.add_argument("--arch", choices=("mlp", "rnn"), default="rnn")
-    p.add_argument("--rnn-mode", choices=("recurrent", "window"), default="recurrent",
-                   help="recurrent: one LSTM pass over the whole path (fast); window: old 10-step sliding window")
+    p.add_argument("--rnn-mode", choices=("window", "recurrent"), default="window",
+                   help="window: LSTM over the last --window observations (history_len, default 8); "
+                        "recurrent: one LSTM pass over the whole path (about window-times less LSTM work)")
     p.add_argument("--net", choices=("single", "double"), default="single")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--market", default="sp500")
@@ -76,6 +78,8 @@ def parse_args(argv=None):
     p.add_argument("--no-obs-norm", action="store_true"); p.add_argument("--no-adv-norm", action="store_true")
     p.add_argument("--credit-held-actions", action="store_true",
                    help="old behaviour: train the actor on proposals that the inactor overrode")
+    p.add_argument("--trace-paths", type=int, default=100,
+                   help="test paths (x assets x strikes) whose full step-by-step trajectories are saved")
     p.add_argument("--device", default=None)
     p.add_argument("--bank-only", action="store_true", help="only build the market banks (pre-generation)")
     return p.parse_args(argv)
@@ -128,26 +132,35 @@ def _compatible(saved_cfg, cfg):
     return all(saved_cfg.get(k) == getattr(cfg, k) for k in keys)
 
 
-def run_training(a, cfg, tasks, params, seed, log, report=None, init_actor=None):
-    """Train one model with fixed hyper-parameters. Returns (agent, val_metric, val_metrics, history)."""
+def run_training(a, cfg, tasks, params, seed, log, report=None, init_actor=None, logs=None):
+    """Train one model with fixed hyper-parameters.
+    Returns (agent, val_metric, val_metrics, logs) with logs = {"eval": [...], "train": [...]}.
+    Pass `logs` to keep the entries even if training is pruned or crashes."""
     train, val, _ = tasks
     torch.manual_seed(seed); np.random.seed(seed)
     agent = Agent(cfg, a.product, train.device)
-    history = []
+    logs = logs if logs is not None else {"eval": [], "train": []}
     if cfg.net == "single":
-        best, m, h = train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed,
-                                 report=report, log=log)
-        return agent, best, m, h
+        best, m, _ = train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed,
+                                 report=report, log=log, logs=logs)
+        return agent, best, m, logs
     if init_actor is not None:
         agent.actor.load_state_dict(init_actor)
     else:
-        _, _, h = train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed,
-                              report=report, log=log)
-        history += h
-    best, m, h = train_phase(agent, train, val, phase="joint", lr_actor=params["joint_lr"],
+        train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed,
+                    report=report, log=log, logs=logs)
+    best, m, _ = train_phase(agent, train, val, phase="joint", lr_actor=params["joint_lr"],
                              lr_inactor=params["inactor_lr"], seed=seed + 10_000, report=report,
-                             step_offset=100_000, log=log)
-    return agent, best, m, history + h
+                             step_offset=100_000, log=log, iter_offset=n_iters(logs), logs=logs)
+    return agent, best, m, logs
+
+
+def n_iters(logs):
+    return logs["train"][-1]["global_iter"] if logs["train"] else 0
+
+
+def _finite(x):
+    return x if isinstance(x, (int, float)) and math.isfinite(x) else None
 
 
 def resolve_protocol(a, cfg, out, log):
@@ -180,6 +193,10 @@ def load_single_actor(proto, cfg, name):
 def main(argv=None):
     a = parse_args(argv)
     device = a.device or default_device()
+    if device.startswith("cuda"):
+        torch.backends.cudnn.benchmark = True          # LSTM shapes are fixed: autotune once
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     a.out.mkdir(parents=True, exist_ok=True)
     log = Logger(a.out / "log.txt")
     cfg = make_config(a)
@@ -232,15 +249,25 @@ def main(argv=None):
             trial.report(value, step)
             if trial.should_prune():
                 raise TrialPruned()
+        logs, state, best, m, t0 = {"eval": [], "train": []}, "failed", None, None, time.time()
         try:
-            agent, best, m, hist = run_training(a, cfg, tasks, params, a.tuning_seed, log, report,
-                                                init_actor=init_tune if from_single else None)
+            agent, best, m, _ = run_training(a, cfg, tasks, params, a.tuning_seed, log, report,
+                                             init_actor=init_tune if from_single else None, logs=logs)
+            state = "complete"
         except TrialPruned:
+            state = "pruned"
             log(f"--- trial {trial.number} pruned")
             raise optuna.TrialPruned()
+        finally:   # full per-trial record, whatever happened
+            trials_dir = a.out / "trials"
+            trials_dir.mkdir(exist_ok=True)
+            (trials_dir / f"trial_{trial.number:03d}.json").write_text(json.dumps(
+                {"trial": trial.number, "state": state, "params": params, "value": _finite(best),
+                 "val_metrics": m, "iters": n_iters(logs), "seconds": time.time() - t0,
+                 "eval_log": logs["eval"], "train_log": logs["train"]}, default=str))
         trial.set_user_attr("val_metrics", m)
         trial.set_user_attr("params_full", params)
-        trial.set_user_attr("iters", hist[-1]["iter"] if hist else 0)
+        trial.set_user_attr("iters", n_iters(logs))
         done = [t for t in study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))]
         if not done or best < min(t.value for t in done):
             save_ckpt(a.out / "best_trial.pt", agent, cfg, {"params": params, "trial": trial.number})
@@ -260,11 +287,20 @@ def main(argv=None):
     (a.out / "best_params.json").write_text(json.dumps(best_params, indent=2))
     log(f"best trial {best_trial.number}: {best_params} val {cfg.metric}={best_trial.value:.4f}")
 
-    def test_report(agent):
+    test_index = env_index(tasks[2])
+
+    def test_report(agent, tag):
+        """Test metrics; per-env arrays and trajectories go to <tag>_test_paths.npz."""
         use_i = cfg.net == "double"
-        res = {"deterministic": evaluate(agent, tasks[2], use_inactor=use_i)[0]}
+        m_det, arr_det = evaluate(agent, tasks[2], use_inactor=use_i)
+        res = {"deterministic": m_det}
+        arrays = {f"deterministic_{k}": v for k, v in arr_det.items()}
+        arrays.update(trace_rollout(agent, tasks[2], a.trace_paths, use_inactor=use_i))
         if use_i:
-            res["stochastic_inaction"] = evaluate(agent, tasks[2], use_inactor=True, inactor_stochastic=True, seed=0)[0]
+            m_st, arr_st = evaluate(agent, tasks[2], use_inactor=True, inactor_stochastic=True, seed=0)
+            res["stochastic_inaction"] = m_st
+            arrays.update({f"stochastic_inaction_{k}": v for k, v in arr_st.items()})
+        np.savez_compressed(a.out / f"{tag}_test_paths.npz", **arrays, **test_index)
         return res
 
     # Test-set evaluation of the best tuning trial (selected on validation only).
@@ -280,11 +316,14 @@ def main(argv=None):
     else:
         agent = Agent(cfg, a.product, device)
         agent.load_state_dict(ck["state"])
-    best_trial_test = test_report(agent)
+    best_trial_test = test_report(agent, "best_trial")
 
-    baselines = {"no_hedge": evaluate_baseline(tasks[2], "no_hedge")}
-    if a.dynamics == "bsm" and a.product == "call":
-        baselines["bs_delta"] = evaluate_baseline(tasks[2], "bs_delta")
+    baselines, base_arrays = {}, {}
+    kinds = ["no_hedge"] + (["bs_delta"] if a.dynamics == "bsm" and a.product == "call" else [])
+    for kind in kinds:
+        baselines[kind], arr = evaluate_baseline(tasks[2], kind)
+        base_arrays.update({f"{kind}_{k}": v for k, v in arr.items()})
+    np.savez_compressed(a.out / "baselines_test_paths.npz", **base_arrays, **test_index)
     log("test baselines: " + ", ".join(f"{k} cvar_95={v['cvar_95']:.2f}" for k, v in baselines.items()))
 
     # Final seeds with the best hyper-parameters.
@@ -299,12 +338,12 @@ def main(argv=None):
         if from_single:
             init, src = load_single_actor(proto, cfg, f"final_seed{seed}.pt")
         t0 = time.time()
-        agent, best, m, hist = run_training(a, cfg, tasks, best_params, seed, log, init_actor=init)
-        res = {"seed": seed, "val_metric": best, "val": m, "test": test_report(agent),
-               "iters": hist[-1]["iter"] if hist else 0, "train_seconds": time.time() - t0,
-               "actor_init_source": src, "history": hist}
+        agent, best, m, logs = run_training(a, cfg, tasks, best_params, seed, log, init_actor=init)
+        res = {"seed": seed, "val_metric": best, "val": m, "test": test_report(agent, f"final_seed{seed}"),
+               "iters": n_iters(logs), "train_seconds": time.time() - t0,
+               "actor_init_source": src, "eval_log": logs["eval"], "train_log": logs["train"]}
         save_ckpt(a.out / f"final_seed{seed}.pt", agent, cfg, {"params": best_params, "seed": seed})
-        jpath.write_text(json.dumps(res, indent=2))
+        jpath.write_text(json.dumps(res, default=str))
         finals[seed] = res
         log(f"    test cvar_95={res['test']['deterministic']['cvar_95']:.4f} "
             f"mean={res['test']['deterministic']['mean']:.4f} ({res['train_seconds']:.0f}s)")
@@ -320,10 +359,17 @@ def main(argv=None):
         "protocol": proto, "config": asdict(cfg), "selection_metric": f"validation {cfg.metric}",
         "best_params": best_params, "best_trial": best_trial.number, "best_val_metric": best_trial.value,
         "trials": {s.name: sum(t.state == s for t in all_trials) for s in TrialState},
+        "trial_table": [{"trial": t.number, "state": t.state.name, "value": _finite(t.value),
+                         "params": t.user_attrs.get("params_full", t.params), "iters": t.user_attrs.get("iters"),
+                         "seconds": t.duration.total_seconds() if t.duration else None} for t in all_trials],
         "best_trial_test": best_trial_test,
         "baselines_test": baselines,
         "final_seeds_test_deterministic": agg,
-        "final_seeds": {s: {k: v for k, v in f.items() if k != "history"} for s, f in finals.items()},
+        "final_seeds": {s: {k: v for k, v in f.items() if k not in ("eval_log", "train_log")}
+                        for s, f in finals.items()},
+        "files": {"trials": "trials/trial_NNN.json (params, eval_log, train_log)",
+                  "final_seed": "final_seedN.json (eval_log, train_log, test metrics)",
+                  "paths": "*_test_paths.npz (per-env arrays + trace_* trajectories), baselines_test_paths.npz"},
         "wall_hours": (time.time() - t_start) / 3600,
     }
     (a.out / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
