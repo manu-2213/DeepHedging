@@ -1,0 +1,34 @@
+{
+  "selected_by": "mean stochastic validation reward, never test reward",
+  "trial": {
+    "strategy": "ppo3",
+    "inactor_lr": 0.01,
+    "initial_hold": 0.05,
+    "actor_scale": 0.1,
+    "actor_every": 3,
+    "actor_freeze": 64,
+    "ramp_batches": 64,
+    "critic_burnin": 0,
+    "entropy": 0.001,
+    "clip": 0.05,
+    "normalize_advantage": true,
+    "target_kl": 0.02,
+    "passes": 3,
+    "anneal": false,
+    "contextual": false
+  },
+  "actor_lr": 0.0001,
+  "validation": {
+    "trial": "ppo3_lr0.01",
+    "budget": 8000,
+    "seeds": 1,
+    "validation_reward": -23.944617589314777,
+    "validation_delta_vs_warmup": 2.578125635782879,
+    "delta_std_across_training_seeds": 0.0,
+    "validation_cvar95": 106.31583913167317,
+    "validation_hold_rate": 0.0
+  },
+  "checkpoints": {
+    "0": "/Users/manu13/Desktop/PHD/DeepHedging/inactor_search_results_fixed/trials/ppo3_lr0.01/seed_0/best.pt"
+  }
+}

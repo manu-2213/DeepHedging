@@ -1,0 +1,69 @@
+{
+  "trial": "contextual_joint_lr0.01",
+  "seed": 0,
+  "budget": 2400,
+  "best_batch": 2400,
+  "best_validation": {
+    "avg_reward": -24.941890716552734,
+    "tracking_var95": 79.23765055338542,
+    "tracking_cvar95": 110.67749277750652,
+    "terminal_abs_error": 43.6866569519043,
+    "hold_rate": 0.0016416666718820732,
+    "hold_probability": 0.001559771674995621,
+    "actor_saturation_rate": 0.0,
+    "actor_loc_abs_max": 2.7872916062672934,
+    "actor_scale_min": 0.03274695575237274,
+    "actor_scale_max": 0.31253230571746826,
+    "intervention_rate": 0.0016416666718820732,
+    "turnover": 0.12973820169766745,
+    "reward_std_across_path_seeds": 0.12017394238229134,
+    "replicates": [
+      {
+        "path_seed": 100001,
+        "avg_reward": -24.978229522705078,
+        "tracking_var95": 80.69996643066406,
+        "tracking_cvar95": 108.20599365234375,
+        "terminal_abs_error": 44.824344635009766,
+        "hold_rate": 0.001500000013038516,
+        "hold_probability": 0.0016336190747097135,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.782050848007202,
+        "actor_scale_min": 0.03274695575237274,
+        "actor_scale_max": 0.3266344666481018,
+        "intervention_rate": 0.001500000013038516,
+        "turnover": 0.13083510100841522
+      },
+      {
+        "path_seed": 100003,
+        "avg_reward": -24.807741165161133,
+        "tracking_var95": 76.34599304199219,
+        "tracking_cvar95": 115.20989990234375,
+        "terminal_abs_error": 42.33625030517578,
+        "hold_rate": 0.001550000044517219,
+        "hold_probability": 0.0015162199269980192,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.803711414337158,
+        "actor_scale_min": 0.03274695575237274,
+        "actor_scale_max": 0.29033830761909485,
+        "intervention_rate": 0.001550000044517219,
+        "turnover": 0.12937165796756744
+      },
+      {
+        "path_seed": 100019,
+        "avg_reward": -25.039701461791992,
+        "tracking_var95": 80.6669921875,
+        "tracking_cvar95": 108.61658477783203,
+        "terminal_abs_error": 43.899375915527344,
+        "hold_rate": 0.0018749999580904841,
+        "hold_probability": 0.0015294760232791305,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.7761125564575195,
+        "actor_scale_min": 0.03274695575237274,
+        "actor_scale_max": 0.32062414288520813,
+        "intervention_rate": 0.0018749999580904841,
+        "turnover": 0.12900784611701965
+      }
+    ]
+  },
+  "checkpoint": "/Users/manu13/Desktop/PHD/DeepHedging/inactor_search_results_fixed/trials/contextual_joint_lr0.01/seed_0/best.pt"
+}

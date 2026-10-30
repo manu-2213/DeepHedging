@@ -1,0 +1,69 @@
+{
+  "trial": "critic_warmup_lr0.03",
+  "seed": 0,
+  "budget": 800,
+  "best_batch": 600,
+  "best_validation": {
+    "avg_reward": -25.84202702840169,
+    "tracking_var95": 83.47896321614583,
+    "tracking_cvar95": 113.81188201904297,
+    "terminal_abs_error": 45.37243143717448,
+    "hold_rate": 0.0,
+    "hold_probability": 1.1140084939228444e-13,
+    "actor_saturation_rate": 0.0,
+    "actor_loc_abs_max": 2.7617876529693604,
+    "actor_scale_min": 0.037530723959207535,
+    "actor_scale_max": 0.1831852396329244,
+    "intervention_rate": 0.0,
+    "turnover": 0.12760241826375326,
+    "reward_std_across_path_seeds": 0.5032654596177872,
+    "replicates": [
+      {
+        "path_seed": 100001,
+        "avg_reward": -25.698528289794922,
+        "tracking_var95": 81.86336517333984,
+        "tracking_cvar95": 108.71327209472656,
+        "terminal_abs_error": 46.40760040283203,
+        "hold_rate": 0.0,
+        "hold_probability": 1.0256202218885888e-13,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.754171848297119,
+        "actor_scale_min": 0.037530723959207535,
+        "actor_scale_max": 0.1824895292520523,
+        "intervention_rate": 0.0,
+        "turnover": 0.12862619757652283
+      },
+      {
+        "path_seed": 100003,
+        "avg_reward": -25.426095962524414,
+        "tracking_var95": 81.99929809570312,
+        "tracking_cvar95": 113.4314193725586,
+        "terminal_abs_error": 43.832611083984375,
+        "hold_rate": 0.0,
+        "hold_probability": 1.2587533012448082e-13,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.7829322814941406,
+        "actor_scale_min": 0.037530723959207535,
+        "actor_scale_max": 0.17947912216186523,
+        "intervention_rate": 0.0,
+        "turnover": 0.12753933668136597
+      },
+      {
+        "path_seed": 100019,
+        "avg_reward": -26.401456832885742,
+        "tracking_var95": 86.57422637939453,
+        "tracking_cvar95": 119.29095458984375,
+        "terminal_abs_error": 45.87708282470703,
+        "hold_rate": 0.0,
+        "hold_probability": 1.0576519586351363e-13,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.7482588291168213,
+        "actor_scale_min": 0.037530723959207535,
+        "actor_scale_max": 0.18758706748485565,
+        "intervention_rate": 0.0,
+        "turnover": 0.12664172053337097
+      }
+    ]
+  },
+  "checkpoint": "/Users/manu13/Desktop/PHD/DeepHedging/inactor_search_results_fixed/trials/critic_warmup_lr0.03/seed_0/best.pt"
+}

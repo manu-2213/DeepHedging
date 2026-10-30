@@ -1,0 +1,69 @@
+{
+  "trial": "contextual_frozen_lr0.03",
+  "seed": 0,
+  "budget": 800,
+  "best_batch": 200,
+  "best_validation": {
+    "avg_reward": -26.522743225097656,
+    "tracking_var95": 83.5709966023763,
+    "tracking_cvar95": 117.95047251383464,
+    "terminal_abs_error": 46.07477951049805,
+    "hold_rate": 0.0,
+    "hold_probability": 7.932326554864015e-11,
+    "actor_saturation_rate": 0.0,
+    "actor_loc_abs_max": 2.8182430267333984,
+    "actor_scale_min": 0.03901335224509239,
+    "actor_scale_max": 0.1928215523560842,
+    "intervention_rate": 0.0,
+    "turnover": 0.13630871971448263,
+    "reward_std_across_path_seeds": 0.31086420051119285,
+    "replicates": [
+      {
+        "path_seed": 100001,
+        "avg_reward": -26.732088088989258,
+        "tracking_var95": 84.136474609375,
+        "tracking_cvar95": 114.67232513427734,
+        "terminal_abs_error": 47.13527297973633,
+        "hold_rate": 0.0,
+        "hold_probability": 7.714247990397993e-11,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.8089704513549805,
+        "actor_scale_min": 0.03901335224509239,
+        "actor_scale_max": 0.19231180846691132,
+        "intervention_rate": 0.0,
+        "turnover": 0.13702723383903503
+      },
+      {
+        "path_seed": 100003,
+        "avg_reward": -26.16554832458496,
+        "tracking_var95": 81.94172668457031,
+        "tracking_cvar95": 120.30952453613281,
+        "terminal_abs_error": 44.730018615722656,
+        "hold_rate": 0.0,
+        "hold_probability": 7.583174366221357e-11,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.8420722484588623,
+        "actor_scale_min": 0.03901335224509239,
+        "actor_scale_max": 0.18309113383293152,
+        "intervention_rate": 0.0,
+        "turnover": 0.13664858043193817
+      },
+      {
+        "path_seed": 100019,
+        "avg_reward": -26.67059326171875,
+        "tracking_var95": 84.6347885131836,
+        "tracking_cvar95": 118.86956787109375,
+        "terminal_abs_error": 46.359046936035156,
+        "hold_rate": 0.0,
+        "hold_probability": 8.499557307972694e-11,
+        "actor_saturation_rate": 0.0,
+        "actor_loc_abs_max": 2.8036863803863525,
+        "actor_scale_min": 0.03901335224509239,
+        "actor_scale_max": 0.20306171476840973,
+        "intervention_rate": 0.0,
+        "turnover": 0.13525034487247467
+      }
+    ]
+  },
+  "checkpoint": "/Users/manu13/Desktop/PHD/DeepHedging/inactor_search_results_fixed/trials/contextual_frozen_lr0.03/seed_0/best.pt"
+}

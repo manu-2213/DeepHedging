@@ -1,0 +1,566 @@
+
+import os
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from hedging.plot_utils import plot_portfolio_vs_option_price
+from torchrl.envs import GymWrapper
+from torchrl.envs.utils import ExplorationType, set_exploration_type
+import numpy as np
+import wandb
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.stats import norm as sp_norm
+
+
+class SelectiveDeterministicJointPolicy(nn.Module):
+    """
+    Wrapper for JointPolicy that applies DETERMINISTIC exploration to actor only,
+    keeping inaction policy stochastic (for its learned probabilistic trade/no-trade decision).
+    """
+    def __init__(self, joint_policy):
+        super().__init__()
+        self.joint_policy = joint_policy
+
+    def forward(self, td):
+        # Apply DETERMINISTIC only to actor policy
+        with set_exploration_type(ExplorationType.DETERMINISTIC):
+            td = self.joint_policy.actor_policy(td)
+        
+        with set_exploration_type(ExplorationType.RANDOM):
+            td = self.joint_policy.inactor_policy(td)
+        
+        # Apply the mixing logic from JointPolicy
+        action = td["action"]
+        inact = td["inact"]
+        A = action.shape[-1]
+        batch_shape = action.shape[:-1]
+        batch_elems = action.numel() // A
+
+        td = td.set("original_action", action.clone())
+        self.joint_policy._ensure_prev_action(action)
+
+        # numeric mask
+        mask = inact.to(action.dtype) if inact.dtype == torch.bool else inact
+
+        # robust mask shaping
+        mnum = mask.numel()
+        anum = action.numel()
+
+        if mnum == batch_elems:
+            mask = mask.reshape(*batch_shape, 1).expand_as(action)
+        elif mnum == batch_elems * 1:
+            mask = mask.reshape(*batch_shape, 1).expand_as(action)
+        elif mnum == anum:
+            mask = mask.reshape_as(action)
+        else:
+            raise RuntimeError(
+                f"Inaction mask size {mnum} is incompatible with action size {anum} "
+                f"(batch_elems={batch_elems}, A={A}, batch_shape={batch_shape}). "
+                f"Expected {batch_elems}, {batch_elems*1}, or {anum} elements."
+            )
+
+        # mix: mask==1 keeps previous action; mask==0 uses current action
+        final_action = torch.where(mask > 0.5, self.joint_policy.prev_action, action)
+        td = td.set("action", final_action)
+        self.joint_policy.prev_action = final_action.detach()
+        return td
+
+    def reset(self):
+        self.joint_policy.reset()
+
+
+def _var(x: np.ndarray, level: float) -> float:
+    """Value at Risk at confidence level (e.g. 0.95). Loss convention: positive = loss."""
+    return float(np.percentile(-x, level * 100))
+
+
+def _cvar(x: np.ndarray, level: float) -> float:
+    """Conditional VaR (Expected Shortfall) at confidence level. Coherent risk measure."""
+    var = _var(x, level)
+    losses = -x
+    return float(losses[losses >= var].mean())
+
+
+def _sharpe(x: np.ndarray) -> float:
+    """Sharpe ratio (mean / std). Returns NaN if std == 0."""
+    std = x.std()
+    return float(x.mean() / std) if std > 0 else float("nan")
+
+
+def _sortino(x: np.ndarray) -> float:
+    """Sortino ratio (mean / downside std). Returns NaN if no losses."""
+    downside = x[x < 0]
+    if len(downside) == 0:
+        return float("nan")
+    downside_std = np.sqrt(np.mean(downside ** 2))
+    return float(x.mean() / downside_std) if downside_std > 0 else float("nan")
+
+
+def compute_risk_metrics(pnl: np.ndarray) -> dict:
+    """
+    Compute risk and performance metrics on a cross-sectional distribution
+    of terminal hedging P&L (one value per Monte Carlo path).
+
+    Parameters
+    ----------
+    pnl : np.ndarray, shape (N,)
+        Terminal hedging P&L per path: portfolio_value - option_payoff at maturity.
+
+    Returns
+    -------
+    dict with keys: mean, std, sharpe, sortino,
+                    var_95, var_99, cvar_95, cvar_99,
+                    skewness, excess_kurtosis, min, max
+    """
+    # Keep final reporting metrics in float64 even when simulation runs in float32.
+    r = pnl.flatten().astype(np.float64)
+
+    from scipy.stats import skew, kurtosis  # lazy import
+
+    metrics = {
+        "mean":             float(r.mean()),
+        "std":              float(r.std()),
+        "sharpe":           _sharpe(r),
+        "sortino":          _sortino(r),
+        "var_95":           _var(r, 0.95),
+        "var_99":           _var(r, 0.99),
+        "cvar_95":          _cvar(r, 0.95),
+        "cvar_99":          _cvar(r, 0.99),
+        "skewness":         float(skew(r)),
+        "excess_kurtosis":  float(kurtosis(r, fisher=True)),  # Fisher: 0 = Gaussian
+        "min":              float(r.min()),
+        "max":              float(r.max()),
+    }
+    return metrics
+
+
+# Default folder for saved P&L plots (experiments/plots/ next to experiments/utils/)
+_DEFAULT_PLOTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "plots")
+)
+
+# Default folder for saved model checkpoints
+_DEFAULT_WEIGHTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "weights")
+)
+
+
+def save_checkpoint(
+    models: dict,
+    run_name: str,
+    weights_dir: str = _DEFAULT_WEIGHTS_DIR,
+) -> None:
+    """
+    Save model state_dicts to experiments/weights/.
+    Filename: <run_name>_run<NNN>_<model_name>.pt
+    The run number is auto-incremented based on existing files in weights_dir.
+    """
+    os.makedirs(weights_dir, exist_ok=True)
+
+    # Find the highest existing run number for this run_name
+    prefix = run_name + "_run"
+    max_run = 0
+    for fname in os.listdir(weights_dir):
+        if fname.startswith(prefix) and fname.endswith(".pt"):
+            rest = fname[len(prefix):]          # e.g. "003_action_model.pt"
+            num_str = rest.split("_")[0]        # "003"
+            try:
+                max_run = max(max_run, int(num_str))
+            except ValueError:
+                pass
+    next_run = max_run + 1
+
+    for model_name, model in models.items():
+        fname = f"{run_name}_run{next_run:03d}_{model_name}.pt"
+        path = os.path.join(weights_dir, fname)
+        state = model.state_dict() if hasattr(model, "state_dict") else model
+        torch.save(state, path)
+        print(f"  Checkpoint saved \u2192 {path}")
+
+
+def _save_pnl_histogram(
+    terminal_pnl: np.ndarray,
+    metrics: dict,
+    script_name: str,
+    plots_dir: str = _DEFAULT_PLOTS_DIR,
+) -> None:
+    """Save a 50-bin P&L histogram with VaR/CVaR/mean markers to disk."""
+    os.makedirs(plots_dir, exist_ok=True)
+
+    var95  = metrics["var_95"]
+    cvar95 = metrics["cvar_95"]
+    mean   = metrics["mean"]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(
+        terminal_pnl, bins=50,
+        color="steelblue", alpha=0.75,
+        edgecolor="white", linewidth=0.4,
+    )
+    # VaR/CVaR are expressed as positive losses; flip sign to mark on the P&L axis
+    ax.axvline(-var95,  color="orange",  lw=1.8, linestyle="--",
+               label=f"VaR  95% = {var95:.2f}")
+    ax.axvline(-cvar95, color="crimson", lw=1.8, linestyle="--",
+               label=f"CVaR 95% = {cvar95:.2f}")
+    ax.axvline(mean,    color="seagreen", lw=1.4, linestyle=":",
+               label=f"Mean     = {mean:.2f}")
+    ax.axvline(0, color="black", lw=0.8, linestyle="-", alpha=0.3)
+
+    ax.set_xlabel("Terminal P\u200b&L  (portfolio value \u2212 option payoff at maturity)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"P\u200b&L Distribution \u2014 {script_name}")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+
+    out_path = os.path.join(plots_dir, f"{script_name}_pnl.png")
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"  P&L histogram saved \u2192 {out_path}")
+
+
+def _log_pnl_distribution(terminal_pnl: np.ndarray) -> None:
+    """Graph 2: Histogram of terminal P&L distribution."""
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=terminal_pnl.tolist(), nbinsx=60, name="Terminal P&L",
+        marker_color="steelblue", opacity=0.75,
+    ))
+    fig.update_layout(
+        title="Terminal Hedging P&L Distribution",
+        xaxis_title="Terminal P&L",
+        yaxis_title="Count",
+        bargap=0.05,
+    )
+    wandb.log({"final/pnl_distribution": wandb.Plotly(fig)})
+
+
+def _log_delta_paths(base_env, n_paths: int = 5) -> None:
+    """Graph 3: Learned delta paths vs analytical BS delta (BSM envs only)."""
+    if not hasattr(base_env, 'shares_held'):
+        return
+
+    shares = base_env.shares_held          # (P, A, K, T+1)
+    num_show   = min(n_paths, base_env.num_paths)
+    num_assets = base_env.num_assets
+    num_strikes = base_env.num_strikes
+    num_steps  = base_env.num_steps
+    T_mat = base_env.maturity
+    dt    = T_mat / num_steps
+    times = (np.arange(num_steps + 1) * dt).tolist()
+
+    has_bsm = hasattr(base_env, 'simulator') and hasattr(base_env.simulator, 'sigma')
+    ncols = max(1, num_assets * num_strikes)
+
+    fig = make_subplots(
+        rows=num_show, cols=ncols,
+        subplot_titles=[f"Path {p+1}" for p in range(num_show * ncols)],
+        shared_xaxes=True, vertical_spacing=0.08, horizontal_spacing=0.05,
+    )
+
+    for p in range(num_show):
+        for i in range(num_assets):
+            for j in range(num_strikes):
+                col_idx = i * num_strikes + j + 1
+                show_legend = (p == 0 and i == 0 and j == 0)
+                learned = shares[p, i, j, :].tolist()
+
+                fig.add_trace(
+                    go.Scatter(x=times, y=learned, mode='lines',
+                               name='Learned δ', line=dict(color='steelblue'),
+                               showlegend=show_legend),
+                    row=p + 1, col=col_idx,
+                )
+
+                if has_bsm:
+                    sigma_i = float(base_env.simulator.sigma[i])
+                    K_ij    = float(base_env.K[i, j])
+                    r       = base_env.r
+                    bs_deltas = []
+                    for t_idx in range(num_steps + 1):
+                        S   = float(base_env.stock_prices[p, i, t_idx])
+                        tau = T_mat - t_idx * dt
+                        if tau <= 1e-6:
+                            bs_deltas.append(1.0 if S > K_ij else 0.0)
+                        else:
+                            d1 = (np.log(S / K_ij) + (r + 0.5 * sigma_i**2) * tau) / (sigma_i * np.sqrt(tau))
+                            bs_deltas.append(float(sp_norm.cdf(d1)))
+                    fig.add_trace(
+                        go.Scatter(x=times, y=bs_deltas, mode='lines',
+                                   name='BS δ', line=dict(color='crimson', dash='dash'),
+                                   showlegend=show_legend),
+                        row=p + 1, col=col_idx,
+                    )
+
+    fig.update_layout(
+        title="Learned Delta Paths vs BS Analytical Delta",
+        height=max(300, 280 * num_show),
+        xaxis_title="Time",
+    )
+    wandb.log({"final/delta_paths": wandb.Plotly(fig)})
+
+
+def _log_transaction_cost_scatter(base_env, terminal_pnl: np.ndarray) -> None:
+    """Graph 5: Per-path total transaction cost vs terminal P&L scatter."""
+    if not hasattr(base_env, 'shares_held'):
+        return
+
+    shares   = base_env.shares_held                              # (P, A, K, T+1)
+    S        = base_env.stock_prices                             # (P, A, T+1)
+    fee_rate = getattr(base_env, 'transaction_fee_rate', 0.0)
+
+    delta_shares = np.diff(shares, axis=-1)                      # (P, A, K, T)
+    S_exp = S[:, :, np.newaxis, :delta_shares.shape[-1]]         # (P, A, 1, T)
+    per_path_cost = (np.abs(delta_shares * S_exp) * fee_rate).sum(axis=(1, 2, 3))  # (P,)
+
+    per_path_pnl = terminal_pnl.reshape(
+        base_env.num_paths, base_env.num_assets, base_env.num_strikes
+    ).mean(axis=(1, 2))                                          # (P,)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=per_path_cost.tolist(), y=per_path_pnl.tolist(),
+        mode='markers',
+        marker=dict(size=5, opacity=0.6, color='steelblue'),
+        name='Paths',
+    ))
+    fig.add_hline(y=0, line_dash="dash", line_color="grey", opacity=0.5)
+    fig.update_layout(
+        title="Transaction Costs vs Terminal P&L (per path)",
+        xaxis_title="Total Transaction Cost",
+        yaxis_title="Terminal P&L",
+    )
+    wandb.log({"final/cost_vs_pnl": wandb.Plotly(fig)})
+
+
+def _log_action_magnitude_distribution(rollout) -> None:
+    """Graph 6: Histogram of rebalancing trade sizes |δ_t − δ_{t-1}|."""
+    actions = rollout["action"].detach().cpu().numpy()   # (num_envs, num_steps, A)
+
+    if actions.ndim == 3:
+        deltas = np.abs(np.diff(actions, axis=1)).flatten()
+    elif actions.ndim == 2:
+        deltas = np.abs(np.diff(actions, axis=0)).flatten()
+    else:
+        deltas = np.abs(np.diff(actions.flatten()))
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=deltas.tolist(), nbinsx=60, name="|Δδ|",
+        marker_color="steelblue", opacity=0.75,
+    ))
+    fig.update_layout(
+        title="Action Magnitude Distribution |δ_t − δ_{t-1}|",
+        xaxis_title="|δ_t − δ_{t-1}|",
+        yaxis_title="Count",
+        bargap=0.05,
+    )
+    wandb.log({"final/action_magnitude_distribution": wandb.Plotly(fig)})
+
+
+def _evaluation_rollout(env, policy, num_steps):
+    module_modes = [(module, module.training) for module in policy.modules()]
+    try:
+        policy.eval()
+        with torch.random.fork_rng(), torch.no_grad():
+            torch.manual_seed(0)
+            if hasattr(policy, "reset"):
+                policy.reset()
+            initial_td = env.reset(seed=0)
+            with set_exploration_type(ExplorationType.DETERMINISTIC):
+                return env.rollout(
+                    max_steps=num_steps,
+                    policy=policy,
+                    auto_reset=False,
+                    tensordict=initial_td,
+                    break_when_any_done=True,
+                )
+    finally:
+        for module, training in module_modes:
+            module.training = training
+
+
+def test_model(base_env, model, num_steps, device, plotting=False, models_to_save=None):
+    env = GymWrapper(base_env, device=device)
+
+    # Handle both models with get_policy_operator() and direct policies (like JointPolicy)
+    if hasattr(model, 'get_policy_operator'):
+        policy = model.get_policy_operator()
+    else:
+        policy = model
+
+    # Check if this is a JointPolicy (actor + inaction)
+    # If so, wrap it to apply DETERMINISTIC only to actor, keep inaction stochastic
+    from experiments.utils.joint_policy import JointPolicy
+    is_joint = isinstance(policy, JointPolicy)
+    
+    if is_joint:
+        def evaluate_joint_policy(eval_policy):
+            rollout_eval = _evaluation_rollout(env, eval_policy, num_steps)
+
+            rewards = rollout_eval["next", "reward"].detach().cpu().numpy()
+
+            terminal_portfolio = base_env.portfolio_value[..., -1]
+            terminal_option = base_env.option_prices[..., -1]
+            terminal_pnl_eval = (
+                terminal_portfolio - terminal_option
+            ).flatten()
+
+            metrics_eval = compute_risk_metrics(terminal_pnl_eval)
+            metrics_eval["mean_reward"] = float(rewards.mean())
+            metrics_eval["std_reward"] = float(rewards.std())
+
+            return rollout_eval, terminal_pnl_eval, metrics_eval
+
+        # Actor deterministic, inaction deterministic.
+        (
+            rollout_deterministic,
+            terminal_pnl_deterministic,
+            metrics_deterministic,
+        ) = evaluate_joint_policy(policy)
+
+        stochastic_inaction_policy = SelectiveDeterministicJointPolicy(policy)
+        (
+            rollout_stochastic,
+            terminal_pnl_stochastic,
+            metrics_stochastic,
+        ) = evaluate_joint_policy(stochastic_inaction_policy)
+
+        # Log both variants and their difference to W&B only.
+        comparison_metrics = [
+            "mean_reward",
+            "std_reward",
+            "mean",
+            "std",
+            "sharpe",
+            "sortino",
+            "var_95",
+            "var_99",
+            "cvar_95",
+            "cvar_99",
+            "skewness",
+            "excess_kurtosis",
+            "min",
+            "max",
+        ]
+
+        wandb_payload = {}
+
+        for metric_name in comparison_metrics:
+            stochastic_value = metrics_stochastic[metric_name]
+            deterministic_value = metrics_deterministic[metric_name]
+
+            wandb_payload[
+                f"final/inaction_stochastic/{metric_name}"
+            ] = stochastic_value
+
+            wandb_payload[
+                f"final/inaction_deterministic/{metric_name}"
+            ] = deterministic_value
+
+            wandb_payload[
+                f"final/inaction_comparison/"
+                f"deterministic_minus_stochastic/{metric_name}"
+            ] = deterministic_value - stochastic_value
+
+        comparison_table = wandb.Table(
+            columns=[
+                "metric",
+                "stochastic_inaction",
+                "deterministic_inaction",
+                "deterministic_minus_stochastic",
+            ],
+            data=[
+                [
+                    metric_name,
+                    metrics_stochastic[metric_name],
+                    metrics_deterministic[metric_name],
+                    (
+                        metrics_deterministic[metric_name]
+                        - metrics_stochastic[metric_name]
+                    ),
+                ]
+                for metric_name in comparison_metrics
+            ],
+        )
+
+        wandb_payload["final/inaction_comparison/table"] = comparison_table
+        wandb.log(wandb_payload)
+
+        # Preserve stochastic-inaction as the default reported rollout for
+        # existing plots, checkpoint flow, and return values.
+        terminal_pnl = terminal_pnl_stochastic
+        metrics = metrics_stochastic
+        rollout = rollout_stochastic
+    else:
+        # Regular policy: apply DETERMINISTIC to entire policy
+        rollout = _evaluation_rollout(env, policy, num_steps)
+        
+        # --- RL reward statistics (training signal, logged for monitoring) ---
+        rewards = rollout['next', 'reward'].detach().cpu().numpy()
+        mean_reward = float(rewards.mean())
+        std_reward = float(rewards.std())
+        print(f"  RL reward  |  mean: {mean_reward:.4f}  std: {std_reward:.4f}")
+        wandb.log({
+            "final/mean_reward": mean_reward,
+            "final/std_reward":  std_reward,
+        })
+
+        # --- Terminal hedging P&L across Monte Carlo paths ---
+        terminal_portfolio = base_env.portfolio_value[..., -1]
+        terminal_option    = base_env.option_prices[..., -1]
+        terminal_pnl = (terminal_portfolio - terminal_option).flatten()
+
+        metrics = compute_risk_metrics(terminal_pnl)
+
+        print(
+            f"\n{'─'*55}\n"
+            f"  Terminal Hedging P&L  (N={len(terminal_pnl)} paths)\n"
+            f"{'─'*55}\n"
+            f"  Summary\n"
+            f"    Mean P&L         : {metrics['mean']:>10.4f}\n"
+            f"    Std  P&L         : {metrics['std']:>10.4f}\n"
+            f"    Min / Max        : {metrics['min']:>10.4f} / {metrics['max']:>10.4f}\n"
+            f"\n"
+            f"  Risk measures  (loss = positive number)\n"
+            f"    VaR  95%         : {metrics['var_95']:>10.4f}\n"
+            f"    VaR  99%         : {metrics['var_99']:>10.4f}\n"
+            f"    CVaR 95% (ES)    : {metrics['cvar_95']:>10.4f}\n"
+            f"    CVaR 99% (ES)    : {metrics['cvar_99']:>10.4f}\n"
+            f"\n"
+            f"  Distribution\n"
+            f"    Sharpe           : {metrics['sharpe']:>10.4f}\n"
+            f"    Sortino          : {metrics['sortino']:>10.4f}\n"
+            f"    Skewness         : {metrics['skewness']:>10.4f}\n"
+            f"    Excess Kurtosis  : {metrics['excess_kurtosis']:>10.4f}\n"
+            f"{'─'*55}"
+        )
+
+    wandb.log({f"final/{name}": value for name, value in metrics.items()})
+
+    # Derive script name from wandb run (each sim sets wandb name = filename)
+    _script_name = (
+        wandb.run.name
+        if wandb.run is not None and wandb.run.name
+        else "run"
+    )
+    print(f"SWEEP_RESULT cvar_95={metrics['cvar_95']:.10g}")
+
+    if os.getenv("DEEP_HEDGING_SAVE_ARTIFACTS", "1") != "0":
+        _save_pnl_histogram(terminal_pnl, metrics, _script_name)
+        _to_save = models_to_save if models_to_save is not None else {"policy": model}
+        save_checkpoint(_to_save, _script_name)
+
+    if plotting:
+        plot_portfolio_vs_option_price(env._env)
+        _log_pnl_distribution(terminal_pnl)
+        _log_delta_paths(env._env)
+        _log_transaction_cost_scatter(env._env, terminal_pnl)
+        _log_action_magnitude_distribution(rollout)
+
+    return terminal_pnl, metrics
+
+
+
+    
+        

@@ -1,0 +1,97 @@
+User prepares a job script:
+
+    - Resources required for the job
+    - The commands to be run
+
+Jobs submited using the command line, scheduler does the rest
+
+Job types:
+    - Single Cores (Easy to submit single nodes)
+    - Multiple cores on the same node
+    - Multiple nodes
+    - GPU accelaeration
+
+Access HPC with SSH (Secure SHell):
+    - Remote Host: login.hpc.qmul.ac.uk
+    - Username: QMUL Username (QMUL email)
+    - Passwprd (generated via ITS Research)
+
+An application (i.e. MATLAB, Python, etc) can be loaded into the environment with a "module load" command
+Use https://docs.hpc.qmul.ac.uk/apps/requesting/ to request applications (don't use yum/apt install)
+
+List of commands:
+module avail - see modules that are available
+module avail python - check versions available
+module load python/3.11 - usd that module
+module unload * - unload that module
+module list - check list of loaded modules
+module purge - unload all modules
+
+
+Job submission:
+- Can request an email when the job begins/ends/has an error
+
+Job scrypt:
+
+#!/bin/bash
+#$ -cwd                 # Use current directory for the job
+#$ -pe smp 1            # Request 1 cores
+#$ -l h_vmem=2G         # Request 2G per cores
+#$ -l h_rt=240:0:0      # Request 240 hours runtime (Maximum runtime for apocrita recommended to do)
+
+module load python
+python mycode.py
+
+for short jobs 1 hour max time usuallly provides immediate access. Good way to check for typos.
+
+# Additional options 
+#$ -j y         # Combine output and error files
+#$ -N NAME      # give a specific name for the job
+#$ -m bae       # enable mail options begin, abort and end
+
+Full list of other options: https://docs.hpc.qmul.ac.uk/using/#other-options
+
+Job script is then submited by running the qsub command:
+qsub example.sh
+
+Submit a job examle:
+
+qlogin      # Connect front end node, default 1 node 1 core, 1 hour. Assigns a number to the job
+module laod python
+python program.py       # 
+exit
+
+
+vim job_script.sh       # Like the job script shown above
+
+
+:wq                     # end of vim file
+qsub job_script.sh      # Submit your jub with the job script file
+
+
+# Checking node and queue stats
+
+qstat           # see the queued/running state of your own Jobs
+nodestatus      # query jobs running on nodes
+showqueue       # show qued jobs for all users - see where you are in the queue
+showqueue -F
+
+Reuqesting 128gb> Sends your work to specialised nodes to handle more memory
+
+
+Exit Codes
+
+exit code 0         # No errors
+exit code 137       # Job exceeds memory ot runtime Resources
+other non-0         # errors (2: command not found)
+https://stats.hps.qmul.ac.uk/univastats/www/jobdetail.php 
+
+update data: rsync -avz --exclude '.venv' ~/Desktop/PHD/DeepHedging/ acw796@login.hpc.qmul.ac.uk:/data/home/acw796/DeepHedging/
+rsync -avz --exclude '.venv' --exclude '.git' --exclude 'wandb' ~/Desktop/PHD/DeepHedging/ acw796@login.hpc.qmul.ac.uk:/data/home/acw796/DeepHedging/
+
+Gcctc49jYRM7wFxWbjV
+
+
+
+
+

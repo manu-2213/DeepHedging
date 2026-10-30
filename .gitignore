@@ -1,0 +1,16 @@
+.ipynb_checkpoints/
+__pycache__/
+wandb
+.DS_Store
+.DeepHedging
+.venv
+.simulation_cache/
+
+# fast pipeline
+.path_banks/
+deep_hedging_v0/experiments/fast/results/
+
+# fast_hedging market banks and run outputs
+.fast_hedging_cache/
+deep_hedging_v0/experiments/results/
+deep_hedging_v0/experiments/simulations/slurm/liquid_1_5/logs/
