@@ -6,6 +6,9 @@ inaction net the proposed trade and its cost) depends on the agent's own past
 actions, so it is fed to the heads rather than to the market encoder.
 
 single net : encoder -> (TanhNormal policy head, value head)        hidden 64
+band net   : same as single, but the policy outputs a target position AND a no-trade
+             half-width per instrument; the executed hedge is the current holding
+             projected onto [target - width, target + width] (learned no-trade band)
 double net : the same actor + an inaction net (encoder -> Bernoulli
              'hold' head, value head); both use hidden int(64/sqrt 2)=45
              so the pair has roughly the parameter count of one single net.
@@ -59,6 +62,7 @@ class SquashedNormal:
     """Normal in pre-tanh space u, action = low + (high-low) * (tanh(u)+1)/2."""
 
     def __init__(self, loc, scale, low, high):
+        """low/high: tensors broadcastable to loc (per-dimension bounds)."""
         self.loc, self.scale, self.low, self.high = loc, scale, low, high
         self.base = torch.distributions.Normal(loc, scale)
 
@@ -70,7 +74,7 @@ class SquashedNormal:
 
     def log_prob(self, u):
         # log|da/du| = log((high-low)/2) + log(1 - tanh(u)^2)
-        log_det = math.log((self.high - self.low) / 2.0) + 2.0 * (math.log(2.0) - u - F.softplus(-2.0 * u))
+        log_det = torch.log((self.high - self.low) / 2.0) + 2.0 * (math.log(2.0) - u - F.softplus(-2.0 * u))
         return (self.base.log_prob(u) - log_det).sum(-1)
 
     def entropy(self):                           # entropy of the base Gaussian (bonus is tiny)
@@ -81,18 +85,26 @@ class SquashedNormal:
 
 
 class ActorCritic(nn.Module):
+    """low/high: floats or per-dimension sequences of length action_dim.
+    The 'band' net uses action_dim = 2 x instruments: [target positions, band half-widths]."""
+
     def __init__(self, mode, obs_dim, action_dim, hidden, low, high, extra_dim=0):
         super().__init__()
         self.encoder = Encoder(mode, obs_dim, hidden, "tanh")
         self.policy = nn.Linear(hidden + extra_dim, 2 * action_dim)
         self.value = nn.Sequential(nn.Linear(hidden + extra_dim, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
-        self.low, self.high, self.extra_dim = float(low), float(high), extra_dim
+        bound = lambda x: torch.as_tensor(x, dtype=torch.float32).expand(action_dim).clone()
+        self.register_buffer("act_low", bound(low))
+        self.register_buffer("act_high", bound(high))
+        if not bool((self.act_high > self.act_low).all()):
+            raise ValueError("action bounds must satisfy high > low in every dimension")
+        self.extra_dim = extra_dim
 
     def heads(self, feat, extra=None):
         h = feat if extra is None else torch.cat([feat, extra], dim=-1)
         loc, raw = self.policy(h).chunk(2, dim=-1)
         scale = (F.softplus(raw + _SCALE_BIAS) + 0.01).clamp_min(1e-4)
-        return SquashedNormal(loc, scale, self.low, self.high), self.value(h).squeeze(-1)
+        return SquashedNormal(loc, scale, self.act_low, self.act_high), self.value(h).squeeze(-1)
 
 
 class Inactor(nn.Module):

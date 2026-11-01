@@ -14,3 +14,8 @@ deep_hedging_v0/experiments/fast/results/
 .fast_hedging_cache/
 deep_hedging_v0/experiments/results/
 deep_hedging_v0/experiments/simulations/slurm/liquid_1_5/logs/
+
+# private paper notes (LaTeX + PDF), never tracked
+paper_notes/
+# slurm logs in any run folder
+deep_hedging_v0/experiments/simulations/slurm/**/logs/

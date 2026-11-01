@@ -8,8 +8,8 @@ Typical use, from deep_hedging_v0/ (on your laptop after rsyncing the results ba
     trials = fa.load_trials(root)                 # one row per Optuna trial
     curves = fa.load_curves(root, kind="eval")    # validation curves of the final seeds
     train  = fa.load_curves(root, kind="train")   # per-iteration PPO diagnostics
-    p = fa.load_paths(f"{root}/bsm_call_rnn_double", seed=1)    # per-path arrays + trajectories
-    fa.compare_nets(root, "bsm", "call", seed=1)  # paired single-vs-double test with bootstrap CI
+    p = fa.load_paths(f"{root}/bsm_call_rnn_double_mean_cvar", seed=1)   # per-path arrays + trajectories
+    fa.compare_nets(root, "bsm", "call", seed=1, net_a="band", net_b="single")  # paired, one model pair
 
 All runs of the same (dynamics, product) use the same test paths in the same order,
 so per-path arrays of the single and double net are directly paired.
@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-RUN_FIELDS = ("dynamics", "product", "arch", "net")
+RUN_FIELDS = ("dynamics", "product", "arch", "net", "reward")
 
 
 def _runs(root):
@@ -31,9 +31,12 @@ def _runs(root):
 
 
 def _meta(run_dir):
-    parts = run_dir.name.split("_")
+    """<dynamics>_<product>_<arch>_<net>_<reward>; v1 names have no reward part (= tracking)."""
+    parts = run_dir.name.split("_", 4)
     if len(parts) >= 4:
-        return dict(zip(RUN_FIELDS, parts[:4]), run=run_dir.name)
+        meta = dict(zip(RUN_FIELDS, parts[:4]), run=run_dir.name)
+        meta["reward"] = parts[4] if len(parts) == 5 else "tracking"
+        return meta
     return {"run": run_dir.name}
 
 
@@ -149,27 +152,44 @@ def paired_bootstrap(pnl_a, pnl_b, env_path, stat=cvar_loss, n_boot=5000, seed=0
     pnl_a, pnl_b, env_path = map(np.asarray, (pnl_a, pnl_b, env_path))
     if pnl_a.shape != pnl_b.shape:
         raise ValueError("arrays are not paired (different shapes)")
-    uniq, inv = np.unique(env_path, return_inverse=True)
-    groups = [np.flatnonzero(inv == g) for g in range(len(uniq))]
     rng = np.random.default_rng(seed)
     diffs = np.empty(n_boot)
-    for i in range(n_boot):
-        idx = np.concatenate([groups[g] for g in rng.integers(0, len(groups), len(groups))])
-        diffs[i] = stat(pnl_a[idx]) - stat(pnl_b[idx])
+    n_paths = len(np.unique(env_path))
+    G = env_path.size // n_paths
+    if G * n_paths == env_path.size and np.array_equal(env_path, np.repeat(np.arange(n_paths), G)):
+        # envs are stored path by path in equal blocks: resample rows of a (paths, G) matrix
+        A2, B2 = pnl_a.reshape(n_paths, G), pnl_b.reshape(n_paths, G)
+        for i in range(n_boot):
+            r = rng.integers(0, n_paths, n_paths)
+            diffs[i] = stat(A2[r].ravel()) - stat(B2[r].ravel())
+    else:
+        uniq, inv = np.unique(env_path, return_inverse=True)
+        groups = [np.flatnonzero(inv == g) for g in range(len(uniq))]
+        for i in range(n_boot):
+            idx = np.concatenate([groups[g] for g in rng.integers(0, len(groups), len(groups))])
+            diffs[i] = stat(pnl_a[idx]) - stat(pnl_b[idx])
     point = stat(pnl_a) - stat(pnl_b)
     lo, hi = np.percentile(diffs, [2.5, 97.5])
     return {"diff": point, "ci_low": float(lo), "ci_high": float(hi), "p_two_sided": float(
         min(1.0, 2 * min((diffs <= 0).mean(), (diffs >= 0).mean())))}
 
 
-def compare_nets(root, dynamics, product, seed=1, arch="rnn", mode="deterministic", n_boot=5000):
-    """Paired comparison of single vs double net on identical test paths.
-    diff < 0 means the double net has the lower (better) CVaR95 / cost / error."""
+def run_dir(root, dynamics, product, net, reward="mean_cvar", arch="rnn"):
     root = Path(root)
-    s = load_paths(root / f"{dynamics}_{product}_{arch}_single", seed)
-    d = load_paths(root / f"{dynamics}_{product}_{arch}_double", seed)
+    new = root / f"{dynamics}_{product}_{arch}_{net}_{reward}"
+    old = root / f"{dynamics}_{product}_{arch}_{net}"           # v1 naming (tracking reward)
+    return new if new.exists() or reward != "tracking" else old
+
+
+def compare_nets(root, dynamics, product, seed=1, arch="rnn", mode="deterministic", n_boot=5000,
+                 net_a="double", net_b="single", reward="mean_cvar"):
+    """Paired comparison of two nets on identical test paths for ONE pair of trained models.
+    diff = net_a - net_b; diff < 0 means net_a has the lower (better) CVaR95 / cost / error.
+    For claims about the method use the seed-level comparison in report.py."""
+    s = load_paths(run_dir(root, dynamics, product, net_b, reward, arch), seed)
+    d = load_paths(run_dir(root, dynamics, product, net_a, reward, arch), seed)
     if not np.array_equal(s["env_path"], d["env_path"]):
-        raise ValueError("single and double runs were evaluated on different test envs")
+        raise ValueError("the two runs were evaluated on different test envs")
     key = lambda p, k: p[f"deterministic_{k}"] if f"{mode}_{k}" not in p else p[f"{mode}_{k}"]
     out = {"cvar_95": paired_bootstrap(key(d, "pnl"), key(s, "pnl"), s["env_path"], n_boot=n_boot)}
     for stat in ("cost", "abs_err"):

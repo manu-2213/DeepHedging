@@ -1,5 +1,43 @@
 # fast_hedging: notes, findings and how to run
 
+## v2.1 (fixes after the second audit, 1 November 2026; slurm folder `v2_1_5`)
+Found by reading the v2.0 code and checking the Heston pricer against a complex128 reference.
+`BANK_VERSION` is 4: every cached bank is rebuilt. Full write-up: `paper_notes/findings.tex`.
+
+| change | why | flag / field to revert |
+|---|---|---|
+| **adaptive integration limit for the Heston characteristic function** (`pricing.heston_phi_max`: per point, from the decay rate of the CF, 50 to 3200 in bins of 50 x 2^k, spacing 0.05) | the fixed `phi_max = 50` truncated the Gil-Pelaez integral far too early near maturity. 2021 S&P fit, ATM call on 3700: 44 vs 50 (10 days), 26 vs 35 (5 days), 6 vs 15 (1 day); OTM prices went negative and the intrinsic clip hid it. Heston doc/con agents traded calls and puts at these prices in the last two weeks: a systematic arbitrage against the exact terminal payoff. Inherited from the original JAX simulator, so the parity test could not see it. complex64 is not the cause (float64 on the same grid gives the same numbers) | `MarketSpec.heston_phi_min / heston_phi_cap / heston_dphi` |
+| `check_bank`: one-step drift test `E[e^{-r dt} X_{t+1} - X_t] = 0` at every step, martingale test also at N-10, N-5, N-1 | the unconditional test at N/4, N/2, 3N/4, N averaged the late bias away, and t = N is the exact payoff | n/a |
+| DOC premium pooled at t = 0; 2000 inner MC paths (was 500) | every outer path starts from the same (S0, v0) but received a different noisy premium (SE about 20 dollars on 250): pure noise in every P&L and CVaR, including the no-hedge baseline | `MarketSpec.heston_mc_paths` |
+| DOC MC normal draws from a CPU generator | a bank is now the same on CPU and GPU (the cache key does not contain the device) | n/a |
+| running VaR per asset (= calibration year) in the mean-CVaR penalty | the pooled quantile mixed four premium scales; the test metric is a per-year CVaR | `--cvar-pooled` |
+| critic loss MSE (was smooth L1 = TorchRL default) | Huber(1) saturates on the rare terminal targets (20 x the excess loss, in premium units): the critic under-estimates the tail, so early steps under-weight the CVaR term, which is the v1 under-hedging failure mode | `--value-loss huber` |
+| `--lmbda` flag and a `lambda` ablation group (BSM call x 3 nets, lambda = 1) | with GAE lambda 0.95 the terminal penalty reaches step t directly with weight 0.95^(N-1-t); earlier steps see it only through the critic | `--lmbda` |
+| window LSTM padding before t = 0 repeats the first observation | zero padding after normalisation fed the *mean* observation for the first 7 steps (the old code zero-padded raw features) | `--pad-mode zero` |
+| Heston minimum-variance delta baseline `mv_delta` (= P1 + rho xi / S dC/dv, stored in the bank) | the plain model delta P1 ignores the vega term, large at rho = -0.95; a weak reference overstates what the agents achieve | n/a |
+| `torch.load(..., weights_only=True)` | checkpoints hold tensors and primitives only; closes the pickle path | n/a |
+| parity test: Heston pricer checked against an independent complex128 reference down to the last trading day; pooled premium asserted | the old test compared against the old (equally wrong) code | n/a |
+
+Smoke test covers a Heston call run now (model and MV delta baselines). Submit with
+`bash submit_all.sh`, `bash submit_all.sh ablation`, `bash submit_all.sh lambda` or `all`.
+
+## v2.0 (slurm folder `v2_1_5`, results `experiments/results/v2_1_5/`)
+Changes after the first full run (v1, archived in `slurm/old_pipeline/liquid_1_5_run1`):
+
+| change | why (v1 evidence) | flag |
+|---|---|---|
+| reward `mean_cvar`: P&L increments + Rockafellar-Uryasev CVaR95 terminal penalty, gamma 1 | the v1 tracking reward counts a cost paid at t about N - t times; both nets under-hedged and lost to BS delta on CVaR95 | `--reward tracking` (ablation) |
+| `band` net: one actor that outputs a target AND a no-trade half-width per instrument | tests whether the double net's gain comes from the extra net or from being able to not trade | `--net band` |
+| digital pays 10% of S0 | v1 paid $1 on a 3,700-point index: no hedge was optimal, the experiment was degenerate | `--digital-payout-frac 0` (v1) |
+| 2 tuning seeds per Optuna trial (objective = mean) | v1 seed-to-seed spread was larger than the single/double gap | `--tuning-seeds` |
+| 10 final seeds, seed-level statistics in `report.py` | path-level CIs only covered test-path noise | `--final-seeds` |
+| per-experiment Optuna sampler seed | v1 runs re-used identical start-up points and picked identical LRs | n/a |
+| target-KL early stop (0.03) and log-ratio clamp in PPO | v1 single-net DOC seeds blew up beyond no-hedge | `--` (TrainConfig.target_kl) |
+| non-finite rollouts skipped (20 in a row stop the phase) | defensive | TrainConfig.max_bad_batches |
+| bank checks: finiteness + martingale test of every discounted price | catches mispriced surfaces / Euler-vs-formula bias before training | `bank_checks.json` |
+| baselines: model delta (BS or Heston P1) for calls, Whalley-Wilmott band (BSM call, scale tuned on validation) | stronger classical references | n/a |
+
+
 ## Why the old pipeline was slow
 Measured on the original code (BSM call, MLP, 100 paths x 4 years x 5 strikes = 2,000 envs):
 
@@ -55,7 +93,8 @@ once over the whole path instead (about 8x less LSTM work, minibatches are whole
 Nothing has been timed on a GPU; `smoke_test.slurm` prints seconds per iteration.
 
 **Optimisations in this version**
-* Heston characteristic-function pricing in complex64, the precision of the original JAX code.
+* Heston characteristic-function pricing in complex64, the precision of the original JAX code, with an
+  adaptive integration limit per point (v2.1; the fixed limit of the original was wrong near maturity).
 * Barrier Monte Carlo updates only the inner paths that have started (half the work), with
   larger GPU batches.
 * Validation every 10 iterations, patience 10 (the same 100-iteration stopping window as
@@ -69,8 +108,8 @@ No input uses information from after the decision time:
 * Market features at step t use prices at t and t-1, time to maturity and r only.
 * Agent state at t uses holdings, cash and costs up to t and the liability price at t.
 * The inaction net sees the proposed trade and its cost at prices of t.
-* The window LSTM reads t-7..t (zero padding before the start); the recurrent LSTM is
-  one-directional; the terminal observation is never fed to a policy.
+* The window LSTM reads t-7..t (the first observation is repeated before the start); the recurrent
+  LSTM is one-directional; the terminal observation is never fed to a policy.
 * Knock-out flags use a running prefix of the path. Nested-MC prices at t use only S_t, v_t.
 * Observation normalisation uses training-bank statistics only. Learning rates and early
   stopping use the validation bank (different paths of the training years). The 2021 test
@@ -119,7 +158,9 @@ No input uses information from after the decision time:
    about 1e3 when a barrier or put price hits zero.
 8. No liquidation cost at maturity, and CON pays 1 on a 3,000-point index, so its premium is
    tiny compared with any hedge trade.
-9. `hpc_notes.txt` contains what looks like a password and is staged in git.
+9. ~~`hpc_notes.txt` contains what looks like a password and is staged in git.~~ Checked on 1 Nov 2026:
+   it only says where the HPC password is issued; there is no credential in git. The slurm files do
+   contain the cluster hostname and the login in the default repo path (override with `DEEP_HEDGING_REPO`).
 
 ## Are 1% and 5% "liquid"?
 For the S&P 500 index, 1% per trade on the underlying is far from liquid; index futures and
@@ -134,11 +175,12 @@ would be the natural liquid counterpart: change `FEES` in `make_slurm.sh`.
 ## How to run (HPC)
 ```bash
 cd /data/home/acw796/DeepHedging && source .venv/bin/activate && uv pip install "optuna>=4.0"
-cd deep_hedging_v0/experiments/simulations/slurm/liquid_1_5
-mkdir -p logs && sbatch smoke_test.slurm      # up to 4 h; check logs/ and the parity output
-./submit_all.sh                               # bank build, then 12 RNN jobs (one per run)
+cd deep_hedging_v0/experiments/simulations/slurm/v2_1_5
+mkdir -p logs && sbatch smoke_test.slurm      # up to 6 h; check logs/ and the parity output
+bash submit_all.sh                            # bank build, then the 18 main runs (one job per run)
+bash submit_all.sh ablation                   # 6 tracking-reward ablations;  ... lambda: 3 GAE-lambda-1 runs
 ```
-Outputs go to `deep_hedging_v0/experiments/results/liquid_1_5/<run>/`:
+Outputs go to `deep_hedging_v0/experiments/results/v2_1_5/<run>/`:
 
 | file | contents |
 |---|---|
@@ -147,7 +189,7 @@ Outputs go to `deep_hedging_v0/experiments/results/liquid_1_5/<run>/`:
 | `final_seedN.json` | validation curve, per-iteration training log, test metrics |
 | `final_seedN_test_paths.npz` | per test env: P&L, cost, tracking error, hold rate, trade count; `trace_*`: step-by-step holdings, proposed trades, hold decisions and probabilities, costs, portfolio value, liability, prices for the first 100 test paths |
 | `best_trial_test_paths.npz` | the same for the best tuning trial |
-| `baselines_test_paths.npz` | per-env P&L and cost of no-hedge (and BS delta for the BSM call) |
+| `baselines_test_paths.npz` | per-env P&L and cost of no-hedge, model delta (calls), Heston MV delta (Heston call), Whalley-Wilmott band (BSM call) |
 | `best_trial.pt`, `final_seedN.pt` | weights |
 | `optuna.journal`, `log.txt` | Optuna storage, full console log |
 
