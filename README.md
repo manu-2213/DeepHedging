@@ -194,3 +194,4 @@ deep_hedging_v0/
 <div align="center">
 <sub>PhD research project · Queen Mary University of London</sub>
 </div>
+
