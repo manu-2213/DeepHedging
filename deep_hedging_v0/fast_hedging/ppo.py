@@ -32,6 +32,7 @@ import copy
 import math
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -46,12 +47,46 @@ class TrialPruned(Exception):
     """Raised by a report callback to abort training early (mapped to optuna.TrialPruned)."""
 
 
+class OutOfTime(BaseException):
+    """The job's time budget ran out and the state is saved. A BaseException, so that Optuna
+    does not record the trial as failed: it stays RUNNING and the next job picks it up."""
+
+
+def _plain(x):
+    """Numpy scalars to Python, so that a resume file loads with weights_only=True."""
+    if isinstance(x, dict):
+        return {k: _plain(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_plain(v) for v in x]
+    return x.item() if isinstance(x, np.generic) else x
+
+
+class RunCheckpoint:
+    """Resume file of one training run (one seed), so a run can span several Slurm jobs."""
+
+    def __init__(self, path, deadline=None):
+        self.path, self.deadline, self.saved = Path(path), deadline, None
+
+    def load(self):
+        self.saved = torch.load(self.path, map_location="cpu", weights_only=True) if self.path.exists() else None
+        return self.saved
+
+    def save(self, state):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(str(self.path) + ".tmp")
+        torch.save(state, tmp)
+        tmp.replace(self.path)              # atomic: a killed job never leaves half a file
+
+    def expired(self):
+        return self.deadline is not None and time.time() >= self.deadline
+
+
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 @dataclass
 class TrainConfig:
-    arch: str = "rnn"                 # rnn | mlp
+    arch: str = "rnn"                 # rnn | mlp | transformer (attention over the same window as rnn_mode=window)
     rnn_mode: str = "window"          # window: LSTM over the last `window` steps | recurrent: whole path
     net: str = "single"               # single | band | double
     window: int = 8                   # history_len: observations the window LSTM sees (t-7..t)
@@ -76,8 +111,10 @@ class TrainConfig:
     lmbda: float = 0.95               # GAE lambda; 1.0 = Monte Carlo advantages (terminal penalty reaches every step)
     clip: float = 0.1
     value_coef: float = 0.1
+    init_std: float | None = None     # policy noise of an untrained net (None: about 1.0)
     entropy_coef: float = 0.001
     max_grad_norm: float = 1.0
+    call_action_low: float = 0.0      # lowest position on a call; the old single net used -1
     target_kl: float | None = 0.03    # stop the PPO epochs of a rollout once approx. KL > 1.5 x this
     paths_per_iter: int = 64          # paths drawn per asset per iteration
     ppo_epochs: int = 4
@@ -87,11 +124,17 @@ class TrainConfig:
                                       # rollout costs several training rollouts with the window LSTM)
     patience: int = 10                # evaluations without improvement (= 100 iterations) before stopping
     min_rel_improvement: float = 1e-3
+    lr_patience: int = 0              # evaluations without improvement before the learning rates are cut (0 = never)
+    lr_decay_factor: float = 0.5      # multiplier at each cut; the best weights are restored at each cut
+    lr_decays: int = 0                # cuts allowed per phase; training stops after `patience` evaluations once they are used
     max_iters: int = 3000             # per phase
     min_iters: int = 50
     metric: str = "cvar_95"
     eval_chunk_paths: int = 256
     max_bad_batches: int = 20         # consecutive non-finite rollouts before a phase is aborted
+    advantage: str = "gae"            # gae: critic + GAE | grpo: no critic, group-relative returns (see grpo_advantages)
+    grpo_group: int = 4               # grpo: copies of each training path per iteration (paths_per_iter counts distinct paths)
+    grpo_norm: str = "group"          # grpo: group = divide by the group's std at each step (GRPO) | none = leave-one-out only
 
     def __post_init__(self):
         if self.gamma is None:
@@ -100,18 +143,24 @@ class TrainConfig:
             raise ValueError(f"unknown net {self.net}")
         if self.reward not in ("mean_cvar", "tracking"):
             raise ValueError(f"unknown reward {self.reward}")
+        if self.advantage not in ("gae", "grpo"):
+            raise ValueError(f"unknown advantage {self.advantage}")
+        if self.advantage == "grpo" and self.grpo_group < 2:
+            raise ValueError("grpo needs grpo_group >= 2")
         if self.value_loss not in ("mse", "huber"):
             raise ValueError(f"unknown value_loss {self.value_loss}")
         if self.pad_mode not in ("edge", "zero"):
             raise ValueError(f"unknown pad_mode {self.pad_mode}")
 
 
-def action_bounds(product):
-    return (0.0, 1.0) if product == "call" else (-1.0, 1.0)
+def action_bounds(product, call_low=0.0):
+    return (call_low, 1.0) if product == "call" else (-1.0, 1.0)
 
 
 def encoder_mode(cfg: TrainConfig) -> str:
-    return "mlp" if cfg.arch == "mlp" else cfg.rnn_mode
+    if cfg.arch in ("mlp", "transformer"):
+        return cfg.arch
+    return cfg.rnn_mode
 
 
 def actor_state_dim(A):
@@ -151,7 +200,7 @@ class Task:
         else:
             scale = torch.ones_like(prem)
         self.asset_scale = scale.float()
-        self.window = cfg.window if encoder_mode(cfg) == "window" else 1
+        self.window = cfg.window if encoder_mode(cfg) in ("window", "transformer") else 1
         if norm is None and cfg.normalize_obs:
             sub = self._raw_obs(torch.arange(min(self.P, 256), device=device))[:, : self.N]
             flat = sub.reshape(-1, sub.shape[-1])
@@ -197,7 +246,7 @@ class Agent:
         self.cfg, self.device = cfg, device
         A = 1 if product == "call" else 2
         self.action_dim = A
-        low, high = action_bounds(product)
+        low, high = action_bounds(product, cfg.call_action_low)
         F_ = feature_dim(product)
         mode = encoder_mode(cfg)
         h = int(cfg.hidden / math.sqrt(2)) if cfg.net == "double" else cfg.hidden
@@ -208,11 +257,12 @@ class Agent:
             self.actor_out = A
             lo_v, hi_v = low, high
         self.actor = ActorCritic(mode, F_, self.actor_out, h, lo_v, hi_v,
-                                 extra_dim=actor_state_dim(A) if cfg.agent_state else 0).to(device)
+                                 extra_dim=actor_state_dim(A) if cfg.agent_state else 0,
+                                 init_std=cfg.init_std, window=cfg.window).to(device)
         self.inactor = None
         if cfg.net == "double":
             self.inactor = Inactor(mode, F_, h, extra_dim=inactor_state_dim(A) if cfg.agent_state else 0,
-                                   init_hold_prob=cfg.inactor_init_hold_prob).to(device)
+                                   init_hold_prob=cfg.inactor_init_hold_prob, window=cfg.window).to(device)
 
     def state_dict(self):
         return {"actor": copy.deepcopy(self.actor.state_dict()),
@@ -351,6 +401,35 @@ def gae(reward, value, gamma, lmbda):
     return adv, adv + value
 
 
+def grpo_advantages(reward, gamma, group, norm="group"):
+    """Critic-free advantages. Envs come in groups of `group` consecutive copies of the same market path
+    (see repeat_groups), which differ only in their sampled actions. At each step t the advantage is the
+    discounted return-to-go minus the mean return-to-go of the OTHER copies at t (leave-one-out, so the
+    baseline does not depend on the env's own actions); with norm='group' it is also divided by the
+    group's std at t, as in GRPO."""
+    B, N = reward.shape
+    ret = torch.zeros_like(reward)
+    acc = torch.zeros(B, device=reward.device)
+    for t in range(N - 1, -1, -1):
+        acc = reward[:, t] + gamma * acc
+        ret[:, t] = acc
+    g = ret.view(B // group, group, N)
+    base = (g.sum(1, keepdim=True) - g) / (group - 1)
+    adv = g - base
+    if norm == "group":                       # a group with (almost) no spread carries no signal: advantage 0
+        sd = g.std(1, keepdim=True)
+        tiny = 1e-5 * (g.abs().mean(1, keepdim=True) + 1.0)
+        adv = torch.where(sd > tiny, adv / sd.clamp_min(1e-12), torch.zeros_like(adv))
+    return adv.reshape(B, N)
+
+
+def repeat_groups(data, group):
+    """Each env of a rollout batch repeated `group` times in a row (same market path, independent actions)."""
+    out = {k: (v.repeat_interleave(group, dim=0) if torch.is_tensor(v) else v) for k, v in data.items()}
+    out["B"] = data["B"] * group
+    return out
+
+
 def _ppo_step(opt, params, loss, max_norm):
     opt.zero_grad(set_to_none=True)
     loss.backward()
@@ -401,7 +480,12 @@ def update(agent: Agent, task: Task, data, rec, *, which, opt, gen=None):
         model, value_old, logp_old = agent.inactor, rec["i_value"], rec["hold_logp"]
         mask = torch.ones_like(value_old)
         state = rec.get("xi")
-    adv, ret = gae(rec["reward"], value_old, cfg.gamma, cfg.lmbda)
+    grpo = cfg.advantage == "grpo"
+    if grpo:                                    # no critic: the value head is left untrained
+        adv = grpo_advantages(rec["reward"], cfg.gamma, cfg.grpo_group, cfg.grpo_norm)
+        ret = torch.zeros_like(adv)
+    else:
+        adv, ret = gae(rec["reward"], value_old, cfg.gamma, cfg.lmbda)
     flat = lambda x: x.reshape(B * N, *x.shape[2:])
     adv, ret, logp_old, mask = flat(adv), flat(ret), flat(logp_old), flat(mask)
     state = None if state is None else flat(state)
@@ -429,7 +513,9 @@ def update(agent: Agent, task: Task, data, rec, *, which, opt, gen=None):
         ratio = torch.exp(log_ratio)
         obj = -torch.min(ratio * a, ratio.clamp(1 - cfg.clip, 1 + cfg.clip) * a)
         loss_obj = _masked_mean(obj, m)
-        if cfg.value_loss == "huber":
+        if grpo:
+            loss_v = torch.zeros((), device=v.device)
+        elif cfg.value_loss == "huber":
             loss_v = cfg.value_coef * F.smooth_l1_loss(v, ret[j])
         else:
             loss_v = cfg.value_coef * ((v - ret[j]) ** 2).mean()
@@ -441,7 +527,8 @@ def update(agent: Agent, task: Task, data, rec, *, which, opt, gen=None):
                          ("approx_kl", kl),
                          ("clip_fraction", _masked_mean(((ratio - 1).abs() > cfg.clip).float(), m)),
                          ("policy_spread", spread),
-                         ("explained_variance", 1 - (ret[j] - v).var() / var_ret)):
+                         ("explained_variance", torch.full((), float("nan"), device=v.device) if grpo
+                          else 1 - (ret[j] - v).var() / var_ret)):
                 stats[k].append(val.detach())
     out = {k: float(torch.stack(v).mean()) if v else float("nan") for k, v in stats.items()}
     out.setdefault("early_stops", 0.0)          # 1.0 if this update stopped early on the KL limit
@@ -487,7 +574,7 @@ def evaluate(agent: Agent, task: Task, *, use_inactor, actor_stochastic=False, i
 # Training phases with early stopping
 # --------------------------------------------------------------------------
 def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_inactor=None, seed=0,
-                report=None, step_offset=0, log=print, iter_offset=0, logs=None, train_log_every=1):
+                report=None, step_offset=0, log=print, iter_offset=0, logs=None, train_log_every=1, ckpt=None):
     """phase 'actor': train the actor alone (the single net, or stage 1 of the double net).
     phase 'joint': train actor+inactor together (stage 2 of the double net).
     Stops when the validation metric has not improved for `patience` evaluations
@@ -495,7 +582,9 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
     Returns (best_metric, best_val_metrics, logs); logs["eval"] has one entry per
     validation check, train_log one entry per iteration (rollout stats + PPO diagnostics).
     If `logs` = {"eval": [...], "train": [...]} is given, entries are appended there as they
-    happen, so they survive a pruned or crashed trial."""
+    happen, so they survive a pruned or crashed trial.
+    With `ckpt` (RunCheckpoint) the full state is saved every 10 validation intervals, a saved state of
+    this phase is continued, and OutOfTime is raised once the deadline has passed."""
     cfg = agent.cfg
     use_inactor = phase == "joint"
     gen = torch.Generator(device=train.device).manual_seed(seed)
@@ -507,9 +596,40 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
     k = min(cfg.paths_per_iter, train.P)
     t0 = time.time()
     n_eval, bad_batches, c_var = 0, 0, None
-    for it in range(1, cfg.max_iters + 1):
+    start, n_decay = 1, 0
+    saved = ckpt.saved if ckpt is not None else None
+    if saved is not None and saved.get("phase") == phase:       # continue this phase where the last job stopped
+        agent.load_state_dict(saved["agent"])
+        opt_a.load_state_dict(saved["opt_a"])
+        if use_inactor:
+            opt_i.load_state_dict(saved["opt_i"])
+        best, best_state, best_metrics, bad = saved["best"], saved["best_state"], saved["best_metrics"], saved["bad"]
+        n_eval, bad_batches, start, iter_offset = saved["n_eval"], saved["bad_batches"], saved["it"], saved["iter_offset"]
+        n_decay = saved.get("n_decay", 0)
+        c_var = None if saved["c_var"] is None else saved["c_var"].to(train.device)
+        gen.set_state(saved["gen"])
+        torch.set_rng_state(saved["rng"])
+        if torch.cuda.is_available() and saved["rng_cuda"]:
+            torch.cuda.set_rng_state_all(saved["rng_cuda"])
+        t0 -= saved["elapsed"]
+        log(f"  [{phase}] resumed at iter {start}, best={best:.4f}")
+    for it in range(start, cfg.max_iters + 1):
+        if ckpt is not None and (ckpt.expired() or (it - 1) % (10 * cfg.eval_every) == 0):
+            ckpt.save({"phase": phase, "it": it, "iter_offset": iter_offset, "agent": agent.state_dict(),
+                       "opt_a": opt_a.state_dict(), "opt_i": opt_i.state_dict() if use_inactor else None,
+                       "best": best, "best_state": best_state, "best_metrics": _plain(best_metrics), "bad": bad,
+                       "n_eval": n_eval, "bad_batches": bad_batches, "n_decay": n_decay, "c_var": c_var,
+                       "gen": gen.get_state(),
+                       "rng": torch.get_rng_state(),
+                       "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                       "elapsed": time.time() - t0, "logs": _plain(logs)})
+            if ckpt.expired():
+                log(f"  [{phase}] time budget used; state saved before iter {it}")
+                raise OutOfTime()
         idx = torch.randperm(train.P, device=train.device, generator=gen)[:k]
         data = train.batch(idx)
+        if cfg.advantage == "grpo":
+            data = repeat_groups(data, cfg.grpo_group)
         rec, out = rollout(agent, train, data, use_inactor=use_inactor, actor_stochastic=True, gen=gen)
         if not (torch.isfinite(rec["reward"]).all() and torch.isfinite(rec["logp"]).all()
                 and torch.isfinite(out["pnl"]).all()):
@@ -523,15 +643,16 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
         if cfg.reward == "mean_cvar":   # Rockafellar-Uryasev terminal penalty, c = running VaR_alpha
             loss_env = -out["pnl"] * data["scale"]
             if cfg.cvar_per_asset:      # envs are ordered (path, asset, strike): one VaR per asset (= year)
-                per_asset = loss_env.view(k, train.A, train.M).transpose(0, 1).reshape(train.A, -1)
-                q = torch.quantile(per_asset, cfg.cvar_alpha, dim=1)[None, :, None].expand(k, train.A, train.M).reshape(-1)
+                per_env = data["B"] // (k * train.A)     # strikes (x grpo copies) per asset
+                per_asset = loss_env.view(k, train.A, per_env).transpose(0, 1).reshape(train.A, -1)
+                q = torch.quantile(per_asset, cfg.cvar_alpha, dim=1)[None, :, None].expand(k, train.A, per_env).reshape(-1)
             else:
                 q = torch.quantile(loss_env, cfg.cvar_alpha)
             c_var = q if c_var is None else cfg.cvar_ema * c_var + (1 - cfg.cvar_ema) * q
             rec["reward"][:, -1] -= cfg.cvar_lambda / (1 - cfg.cvar_alpha) * torch.relu(loss_env - c_var)
         entry = {"iter": it, "global_iter": iter_offset + it, "phase": phase,
                  "cvar_threshold": float(c_var.mean()) if c_var is not None else None,
-                 "cvar_threshold_per_asset": (c_var.view(k, train.A, train.M)[0, :, 0].tolist()
+                 "cvar_threshold_per_asset": (c_var.view(k, train.A, -1)[0, :, 0].tolist()
                                               if c_var is not None and c_var.dim() else None),
                  "train_cvar_95": risk_metrics(out["pnl"].cpu().numpy())["cvar_95"],
                  "train_mean_pnl": float(out["pnl"].mean()), "train_abs_err": float(out["abs_err"].mean()),
@@ -545,6 +666,8 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
                 entry[f"actor_{key}"] = val_
         entry["elapsed_s"] = time.time() - t0
         logs["last_global_iter"] = iter_offset + it
+        logs.setdefault("phase_seconds", {})[phase] = time.time() - t0
+        entry["lr_actor"] = opt_a.param_groups[0]["lr"]
         if it == 1 or it % train_log_every == 0:
             train_log.append(entry)
         if it % cfg.eval_every == 0:
@@ -564,10 +687,24 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
             history[-1]["best_so_far"], history[-1]["bad_evals"] = best, bad
             log(f"  [{phase}] it {it:5d}  val {cfg.metric}={metric:.4f}  best={best:.4f}  "
                 f"hold={m['hold_rate']:.3f}  cost={m['mean_cost']:.2f}  bad={bad}/{cfg.patience}  "
-                f"{(time.time() - t0) / it:.2f}s/it")
+                f"{(time.time() - t0) / it:.2f}s/it | track={m['mean_abs_tracking_error']:.2f} trades={m['mean_trades']:.0f} "
+                f"train: rew={entry['train_reward']:.3f} cvar={entry['train_cvar_95']:.1f} err={entry['train_abs_err']:.2f} "
+                f"cost={entry['train_cost']:.1f} std={entry.get('actor_policy_spread', float('nan')):.3f} "
+                f"ev={entry.get('actor_explained_variance', float('nan')):.2f}")
             if report is not None:
                 report(step_offset + n_eval, metric)        # may raise TrialPruned
-            if bad >= cfg.patience and it >= cfg.min_iters:
+            if n_decay < cfg.lr_decays and cfg.lr_patience and bad >= cfg.lr_patience:
+                n_decay += 1                                # plateau: go back to the best weights with smaller steps
+                for o in (opt_a, opt_i):
+                    if o is not None:
+                        for g in o.param_groups:
+                            g["lr"] *= cfg.lr_decay_factor
+                agent.load_state_dict(best_state)
+                bad = 0
+                history[-1]["lr_cut"] = n_decay
+                log(f"  [{phase}] it {it:5d}  no improvement for {cfg.lr_patience} checks: learning rates x{cfg.lr_decay_factor} "
+                    f"(cut {n_decay}/{cfg.lr_decays}, actor lr {opt_a.param_groups[0]['lr']:.3g}), best weights restored")
+            elif bad >= cfg.patience and it >= cfg.min_iters:
                 break
     agent.load_state_dict(best_state)
     return best, best_metrics, logs

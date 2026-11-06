@@ -1,0 +1,5 @@
+oldfee1_lr_5e-6 --paths-per-iter 100 --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward tracking --reward-norm none --no-obs-norm --no-adv-norm --value-loss huber --value-coef 1.0 --window 10 --pad-mode zero --no-agent-state --call-action-low -1 --underlying-fee 0.01 --option-fee 0.05 --actor-lr-range 5e-6 5e-6
+oldfee1_lr_1e-5 --paths-per-iter 100 --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward tracking --reward-norm none --no-obs-norm --no-adv-norm --value-loss huber --value-coef 1.0 --window 10 --pad-mode zero --no-agent-state --call-action-low -1 --underlying-fee 0.01 --option-fee 0.05 --actor-lr-range 1e-5 1e-5
+cvar4_lr_1e-5 --paths-per-iter 100 --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward mean_cvar --window 8 --underlying-fee 0.01 --option-fee 0.05 --actor-lr-range 1e-5 1e-5
+cvar4_lr_1e-4 --paths-per-iter 100 --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward mean_cvar --window 8 --underlying-fee 0.01 --option-fee 0.05 --actor-lr-range 1e-4 1e-4
+cvar4_lr_1e-3 --paths-per-iter 100 --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward mean_cvar --window 8 --underlying-fee 0.01 --option-fee 0.05 --actor-lr-range 1e-3 1e-3

@@ -10,6 +10,9 @@
 The Optuna journal makes the job resumable: resubmitting the same command
 continues the study and skips final seeds that already finished.
 
+With --time-budget-min the run also fits short Slurm jobs: it saves its full training state in <out>/resume
+and exits with code 75 when the budget is used, and the same command continues exactly there.
+
 Example:
   python -m fast_hedging.experiment --dynamics bsm --product call --arch rnn --net single \
       --out results/bsm_call_rnn_single
@@ -21,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -29,10 +33,11 @@ import numpy as np
 import torch
 
 from .market import MarketSpec, get_bank, default_device
-from .ppo import (Agent, Task, TrainConfig, TrialPruned, env_index, evaluate, evaluate_baseline, trace_rollout,
+from .ppo import (Agent, OutOfTime, RunCheckpoint, Task, TrainConfig, TrialPruned, _plain, env_index, evaluate, evaluate_baseline, trace_rollout,
                   train_phase, tune_ww_band)
 
 SPLIT_SEEDS = {"train": 101, "val": 202, "test": 303}       # identical for every experiment
+EXIT_RESUME = 75       # the Slurm script resubmits itself on this exit code
 DEFAULT_PATHS = {"bsm": {"train": 2000, "val": 500, "test": 2000},
                  "heston": {"train": 1000, "val": 250, "test": 1000}}
 
@@ -41,7 +46,11 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dynamics", choices=("bsm", "heston"), required=True)
     p.add_argument("--product", choices=("call", "doc", "con"), required=True)
-    p.add_argument("--arch", choices=("mlp", "rnn"), default="rnn")
+    p.add_argument("--arch", choices=("mlp", "rnn", "transformer"), default="rnn",
+                   help="transformer: attention over the same --window as the window LSTM")
+    p.add_argument("--advantage", choices=("gae", "grpo"), help="gae (critic, default) | grpo (no critic, group-relative)")
+    p.add_argument("--grpo-group", type=int, help="grpo: copies of each path per iteration (default 4)")
+    p.add_argument("--grpo-norm", choices=("group", "none"), help="grpo: divide by the group std (default group)")
     p.add_argument("--rnn-mode", choices=("window", "recurrent"), default="window",
                    help="window: LSTM over the last --window observations (history_len, default 8); "
                         "recurrent: one LSTM pass over the whole path (about window-times less LSTM work)")
@@ -70,6 +79,8 @@ def parse_args(argv=None):
     p.add_argument("--tune-joint-lr", action="store_true",
                    help="tune the joint-phase actor LR separately (default: joint LR = actor LR, old protocol)")
     p.add_argument("--no-pruning", action="store_true")
+    p.add_argument("--prune-warmup", type=int,
+                   help="validation checks before a trial may be pruned, counted within each phase (default: 8, first phase only)")
     p.add_argument("--tuning-seeds", type=int, nargs="+", default=[0, 1000],
                    help="each trial is trained once per seed; the objective is the mean validation metric "
                         "(pruning uses the first seed). Several seeds make LR selection robust to seed luck")
@@ -81,9 +92,16 @@ def parse_args(argv=None):
     p.add_argument("--single-dir", type=Path, help="results dir of the matching single-net run (from-single)")
     # training knobs (see ppo.TrainConfig for defaults)
     for name in ("paths-per-iter", "ppo-epochs", "minibatch", "eval-every", "patience", "max-iters",
-                 "min-iters", "window", "hidden", "actor-update-every"):
+                 "min-iters", "window", "hidden", "actor-update-every", "lr-patience", "lr-decays"):
         p.add_argument(f"--{name}", type=int)
     p.add_argument("--min-rel-improvement", type=float)
+    p.add_argument("--lr-decay-factor", type=float, help="learning-rate multiplier at each plateau cut (default 0.5)")
+    p.add_argument("--value-coef", type=float, help="critic loss weight (default 0.1; the old pipeline effectively used 1.0)")
+    p.add_argument("--call-action-low", type=float, help="lowest position on a call (default 0; the old single net used -1)")
+    p.add_argument("--target-kl", type=float, help="KL limit on the PPO epochs of a rollout (default 0.03; 0 = none, as the old code)")
+    p.add_argument("--init-std", type=float, help="policy noise of an untrained net (default: about 1.0)")
+    p.add_argument("--time-budget-min", type=float,
+                   help="save the training state and exit with code 75 after this many minutes (for chained short jobs)")
     p.add_argument("--no-agent-state", action="store_true",
                    help="old inputs only: hide holdings, tracking error, costs, time since trade, proposed trade")
     p.add_argument("--inactor-init-hold-prob", type=float)
@@ -111,9 +129,13 @@ def make_config(a) -> TrainConfig:
                       cvar_per_asset=not a.cvar_pooled)
     over = {k.replace("-", "_"): getattr(a, k.replace("-", "_")) for k in
             ("paths-per-iter", "ppo-epochs", "minibatch", "eval-every", "patience", "max-iters", "min-iters",
-             "window", "hidden", "actor-update-every", "min-rel-improvement", "inactor-init-hold-prob",
-             "reward-norm", "cvar-lambda", "lmbda", "value-loss", "pad-mode")}
-    return replace(cfg, **{k: v for k, v in over.items() if v is not None})
+             "window", "hidden", "actor-update-every", "lr-patience", "lr-decays", "lr-decay-factor", "min-rel-improvement", "inactor-init-hold-prob",
+             "reward-norm", "cvar-lambda", "lmbda", "value-loss", "pad-mode", "value-coef", "init-std", "call-action-low",
+             "advantage", "grpo-group", "grpo-norm")}
+    cfg = replace(cfg, **{k: v for k, v in over.items() if v is not None})
+    if a.target_kl is not None:
+        cfg = replace(cfg, target_kl=a.target_kl if a.target_kl > 0 else None)
+    return cfg
 
 
 def load_tasks(a, cfg, device):
@@ -154,25 +176,35 @@ def _compatible(saved_cfg, cfg):
     return all(saved_cfg.get(k) == getattr(cfg, k) for k in keys)
 
 
-def run_training(a, cfg, tasks, params, seed, log, report=None, init_actor=None, logs=None, train_log_every=1):
+def run_training(a, cfg, tasks, params, seed, log, report=None, init_actor=None, logs=None, train_log_every=1, ckpt=None):
     """Train one model with fixed hyper-parameters.
     Returns (agent, val_metric, val_metrics, logs) with logs = {"eval": [...], "train": [...]}.
-    Pass `logs` to keep the entries even if training is pruned or crashes."""
+    Pass `logs` to keep the entries even if training is pruned or crashes.
+    Pass `ckpt` (RunCheckpoint) to continue a run that an earlier job started."""
     train, val, _ = tasks
     torch.manual_seed(seed); np.random.seed(seed)
     agent = Agent(cfg, a.product, train.device)
     logs = logs if logs is not None else {"eval": [], "train": []}
-    kw = dict(report=report, log=log, logs=logs, train_log_every=train_log_every)
+    saved = ckpt.load() if ckpt is not None else None
+    if saved is not None:
+        logs.update(saved["logs"])
+        if saved["phase"] == "done":
+            agent.load_state_dict(saved["agent"])
+            return agent, saved["best"], saved["best_metrics"], logs
+    kw = dict(report=report, log=log, logs=logs, train_log_every=train_log_every, ckpt=ckpt)
     if cfg.net != "double":          # single and band nets: one phase
         best, m, _ = train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed, **kw)
-        return agent, best, m, logs
-    if init_actor is not None:
-        agent.actor.load_state_dict(init_actor)
     else:
-        train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed, **kw)
-    best, m, _ = train_phase(agent, train, val, phase="joint", lr_actor=params["joint_lr"],
-                             lr_inactor=params["inactor_lr"], seed=seed + 10_000, step_offset=100_000,
-                             iter_offset=n_iters(logs), **kw)
+        if init_actor is not None:
+            agent.actor.load_state_dict(init_actor)
+        elif saved is None or saved["phase"] != "joint":
+            train_phase(agent, train, val, phase="actor", lr_actor=params["actor_lr"], seed=seed, **kw)
+        best, m, _ = train_phase(agent, train, val, phase="joint", lr_actor=params["joint_lr"],
+                                 lr_inactor=params["inactor_lr"], seed=seed + 10_000, step_offset=100_000,
+                                 iter_offset=n_iters(logs), **kw)
+    if ckpt is not None:             # survives the job ending before the caller has stored the result
+        ckpt.save({"phase": "done", "agent": agent.state_dict(), "best": best, "best_metrics": _plain(m),
+                   "logs": _plain(logs)})
     return agent, best, m, logs
 
 
@@ -212,7 +244,14 @@ def load_single_actor(proto, cfg, name):
 
 
 def main(argv=None):
-    a = parse_args(argv)
+    try:
+        run(parse_args(argv))
+    except OutOfTime:
+        print("time budget used; state saved, submit the same command again to continue", flush=True)
+        sys.exit(EXIT_RESUME)
+
+
+def run(a):
     device = a.device or default_device()
     if device.startswith("cuda"):
         torch.backends.cudnn.benchmark = True          # LSTM shapes are fixed: autotune once
@@ -234,6 +273,29 @@ def main(argv=None):
     if a.bank_only:
         return
     proto = resolve_protocol(a, cfg, a.out, log)
+    chained = a.time_budget_min is not None
+    deadline = t_start + a.time_budget_min * 60 if chained else None
+    resume_dir = a.out / "resume"
+
+    def ck(tag):
+        return RunCheckpoint(resume_dir / f"{tag}.pt", deadline) if chained else None
+
+    def clear(pattern):
+        for f in resume_dir.glob(pattern):
+            f.unlink()
+
+    def once(tag, fn):
+        """Chained jobs compute a test-set block once and keep it for later jobs."""
+        path = a.out / f"{tag}.json"
+        if chained and path.exists():
+            return json.loads(path.read_text())
+        if chained and time.time() >= deadline:
+            raise OutOfTime()
+        res = fn()
+        if chained:
+            path.write_text(json.dumps(res, default=str))
+        return res
+
     from_single = proto["actor_init"] == "from-single"
     if from_single:   # the loaded actor keeps the single-net width (int(91/sqrt 2) = 64)
         cfg = replace(cfg, hidden=int(math.ceil(cfg.hidden * math.sqrt(2))))
@@ -250,12 +312,17 @@ def main(argv=None):
     # each experiment explores its own sequence of start-up points (v1 used seed 0 everywhere)
     sampler_seed = int(hashlib.sha256(name.encode()).hexdigest()[:8], 16)
     pruner = optuna.pruners.NopPruner() if a.no_pruning else optuna.pruners.MedianPruner(
-        n_startup_trials=6, n_warmup_steps=8, interval_steps=1)
+        n_startup_trials=6, n_warmup_steps=8 if a.prune_warmup is None else a.prune_warmup, interval_steps=1)
     study = optuna.create_study(study_name="study", storage=storage, direction="minimize", load_if_exists=True,
                                 sampler=optuna.samplers.TPESampler(seed=sampler_seed, n_startup_trials=8),
                                 pruner=pruner)
+    if chained:      # a sampler restarted with the same seed would redraw the learning rates of the first job
+        study.sampler = optuna.samplers.TPESampler(seed=sampler_seed + len(study.get_trials(deepcopy=False)),
+                                                   n_startup_trials=8)
     for tr in study.get_trials(deepcopy=False, states=(TrialState.RUNNING,)):
-        study._storage.set_trial_state_values(tr._trial_id, TrialState.FAIL)   # left over from a killed job
+        # A saved trial goes back to the queue with its parameters and reports; anything else was killed.
+        paused = chained and any(resume_dir.glob(f"trial{tr.number}_seed*.pt"))
+        study._storage.set_trial_state_values(tr._trial_id, TrialState.WAITING if paused else TrialState.FAIL)
 
     def suggest(trial):
         params = {}
@@ -275,7 +342,8 @@ def main(argv=None):
 
         def report(step, value):
             trial.report(value, step)
-            if trial.should_prune():
+            # the double net's joint phase reports from step 100000, past the pruner's own warmup
+            if step % 100_000 >= (a.prune_warmup or 0) and trial.should_prune():
                 raise TrialPruned()
         state, t0, runs, agent0 = "failed", time.time(), [], None
         try:
@@ -285,30 +353,36 @@ def main(argv=None):
                 agent, best_s, m_s, _ = run_training(
                     a, cfg, tasks, params, seed, log, report if i == 0 else None,
                     init_actor=init_tune if from_single else None, logs=logs,
-                    train_log_every=a.trial_log_every)
+                    train_log_every=a.trial_log_every, ckpt=ck(f"trial{trial.number}_seed{seed}"))
                 runs[-1].update(value=best_s, val_metrics=m_s)
                 if i == 0:
                     agent0 = agent
             state = "complete"
+        except OutOfTime:
+            state = "paused"
+            raise
         except TrialPruned:
             state = "pruned"
             log(f"--- trial {trial.number} pruned")
             raise optuna.TrialPruned()
-        finally:   # full per-trial record, whatever happened
+        finally:   # full per-trial record, whatever happened (a paused trial carries on in the next job)
             vals = [r["value"] for r in runs if r["value"] is not None]
             value = float(np.mean(vals)) if vals and all(math.isfinite(v) for v in vals) else None
             first = runs[0] if runs else {"logs": {"eval": [], "train": []}, "val_metrics": None}
             trials_dir = a.out / "trials"
             trials_dir.mkdir(exist_ok=True)
-            (trials_dir / f"trial_{trial.number:03d}.json").write_text(json.dumps(
-                {"trial": trial.number, "state": state, "params": params,
-                 "value": value if state == "complete" else _finite(runs[0]["value"]) if runs else None,
-                 "val_metrics": first["val_metrics"], "iters": sum(n_iters(r["logs"]) for r in runs),
-                 "seconds": time.time() - t0,
-                 "eval_log": first["logs"]["eval"], "train_log": first["logs"]["train"],
-                 "per_seed": [{"seed": r["seed"], "value": _finite(r["value"]), "val_metrics": r["val_metrics"],
-                               "iters": n_iters(r["logs"]), "eval_log": r["logs"]["eval"],
-                               "train_log": r["logs"]["train"]} for r in runs]}, default=str))
+            if state != "paused":
+                (trials_dir / f"trial_{trial.number:03d}.json").write_text(json.dumps(
+                    {"trial": trial.number, "state": state, "params": params,
+                     "value": value if state == "complete" else _finite(runs[0]["value"]) if runs else None,
+                     "val_metrics": first["val_metrics"], "iters": sum(n_iters(r["logs"]) for r in runs),
+                     "seconds": time.time() - t0,
+                     "eval_log": first["logs"]["eval"], "train_log": first["logs"]["train"],
+                     "per_seed": [{"seed": r["seed"], "value": _finite(r["value"]), "val_metrics": r["val_metrics"],
+                                   "iters": n_iters(r["logs"]), "eval_log": r["logs"]["eval"],
+                                   "train_log": r["logs"]["train"]} for r in runs]}, default=str))
+                if chained:
+                    clear(f"trial{trial.number}_seed*.pt")
         best = value if value is not None else math.inf
         m = runs[0]["val_metrics"]
         trial.set_user_attr("val_metrics", m)
@@ -324,9 +398,17 @@ def main(argv=None):
 
     finished = lambda: len(study.get_trials(deepcopy=False, states=(TrialState.COMPLETE, TrialState.PRUNED)))
     remaining = a.n_trials - finished()
-    if remaining > 0:
-        study.optimize(objective, n_trials=remaining, timeout=a.tuning_hours * 3600, catch=(torch.cuda.OutOfMemoryError,),   # real bugs should crash, not be skipped
-                       gc_after_trial=True)
+    clock = a.out / "tuning_clock.json"      # chained jobs share the --tuning-hours cap
+    spent = json.loads(clock.read_text())["seconds"] if chained and clock.exists() else 0.0
+    if remaining > 0 and a.tuning_hours * 3600 > spent:
+        t_tune = time.time()
+        try:
+            study.optimize(objective, n_trials=remaining, timeout=a.tuning_hours * 3600 - spent,
+                           catch=(torch.cuda.OutOfMemoryError,),   # real bugs should crash, not be skipped
+                           gc_after_trial=True)
+        finally:
+            if chained:
+                clock.write_text(json.dumps({"seconds": spent + time.time() - t_tune}))
     complete = study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
     if not complete:
         raise SystemExit("no completed Optuna trial; nothing to evaluate")
@@ -354,34 +436,39 @@ def main(argv=None):
     # Test-set evaluation of the best tuning trial (selected on validation only).
     # If the job died between saving a checkpoint and Optuna recording the trial, the file can
     # belong to a different trial; retrain the best trial (same seed) in that case.
-    ck_path = a.out / "best_trial.pt"
-    ck = torch.load(ck_path, map_location=device, weights_only=True) if ck_path.exists() else None
-    if ck is None or ck.get("trial") != best_trial.number:
-        log(f"best_trial.pt does not hold trial {best_trial.number}; retraining it")
-        agent, _, _, _ = run_training(a, cfg, tasks, best_params, a.tuning_seeds[0], log,
-                                      init_actor=init_tune if from_single else None)
-        save_ckpt(ck_path, agent, cfg, {"params": best_params, "trial": best_trial.number})
-    else:
-        agent = Agent(cfg, a.product, device)
-        agent.load_state_dict(ck["state"])
-    best_trial_test = test_report(agent, "best_trial")
+    def best_trial_block():
+        ck_path = a.out / "best_trial.pt"
+        ck_best = torch.load(ck_path, map_location=device, weights_only=True) if ck_path.exists() else None
+        if ck_best is None or ck_best.get("trial") != best_trial.number:
+            log(f"best_trial.pt does not hold trial {best_trial.number}; retraining it")
+            agent, _, _, _ = run_training(a, cfg, tasks, best_params, a.tuning_seeds[0], log,
+                                          init_actor=init_tune if from_single else None, ckpt=ck("best_trial_retrain"))
+            save_ckpt(ck_path, agent, cfg, {"params": best_params, "trial": best_trial.number})
+        else:
+            agent = Agent(cfg, a.product, device)
+            agent.load_state_dict(ck_best["state"])
+        return test_report(agent, "best_trial")
+    best_trial_test = once("best_trial_test", best_trial_block)
 
-    baselines, base_arrays = {}, {}
-    plan = [("no_hedge", None)]
-    if a.product == "call":
-        plan.append(("model_delta", None))          # BS N(d1) or Heston P1
-    if a.product == "call" and a.dynamics == "heston":
-        plan.append(("mv_delta", None))             # Heston minimum-variance delta (spot + correlated vol move)
-    if a.product == "call" and a.dynamics == "bsm":
-        k_ww, ww_scores = tune_ww_band(tasks[1])     # band scale chosen on validation only
-        log(f"Whalley-Wilmott band scale chosen on validation: {k_ww:.3g}")
-        plan.append(("ww_band", k_ww))
-    for kind, param in plan:
-        baselines[kind], arr = evaluate_baseline(tasks[2], kind, param)
-        base_arrays.update({f"{kind}_{k}": v for k, v in arr.items()})
-    if a.product == "call" and a.dynamics == "bsm":
-        baselines["ww_band"]["validation_scores"] = {f"{k:.4g}": v for k, v in ww_scores.items()}
-    np.savez_compressed(a.out / "baselines_test_paths.npz", **base_arrays, **test_index)
+    def baselines_block():
+        baselines, base_arrays = {}, {}
+        plan = [("no_hedge", None)]
+        if a.product == "call":
+            plan.append(("model_delta", None))          # BS N(d1) or Heston P1
+        if a.product == "call" and a.dynamics == "heston":
+            plan.append(("mv_delta", None))             # Heston minimum-variance delta (spot + correlated vol move)
+        if a.product == "call" and a.dynamics == "bsm":
+            k_ww, ww_scores = tune_ww_band(tasks[1])     # band scale chosen on validation only
+            log(f"Whalley-Wilmott band scale chosen on validation: {k_ww:.3g}")
+            plan.append(("ww_band", k_ww))
+        for kind, param in plan:
+            baselines[kind], arr = evaluate_baseline(tasks[2], kind, param)
+            base_arrays.update({f"{kind}_{k}": v for k, v in arr.items()})
+        if a.product == "call" and a.dynamics == "bsm":
+            baselines["ww_band"]["validation_scores"] = {f"{k:.4g}": v for k, v in ww_scores.items()}
+        np.savez_compressed(a.out / "baselines_test_paths.npz", **base_arrays, **test_index)
+        return baselines
+    baselines = once("baselines_test", baselines_block)
     log("test baselines: " + ", ".join(f"{k} cvar_95={v['cvar_95']:.2f}" for k, v in baselines.items()))
 
     # Final seeds with the best hyper-parameters.
@@ -396,12 +483,15 @@ def main(argv=None):
         if from_single:
             init, src = load_single_actor(proto, cfg, f"final_seed{seed}.pt")
         t0 = time.time()
-        agent, best, m, logs = run_training(a, cfg, tasks, best_params, seed, log, init_actor=init)
+        agent, best, m, logs = run_training(a, cfg, tasks, best_params, seed, log, init_actor=init,
+                                            ckpt=ck(f"final_seed{seed}"))
         res = {"seed": seed, "val_metric": best, "val": m, "test": test_report(agent, f"final_seed{seed}"),
-               "iters": n_iters(logs), "train_seconds": time.time() - t0,
+               "iters": n_iters(logs), "train_seconds": sum(logs.get("phase_seconds", {}).values()) or time.time() - t0,
                "actor_init_source": src, "eval_log": logs["eval"], "train_log": logs["train"]}
         save_ckpt(a.out / f"final_seed{seed}.pt", agent, cfg, {"params": best_params, "seed": seed})
         jpath.write_text(json.dumps(res, default=str))
+        if chained:
+            clear(f"final_seed{seed}.pt")
         finals[seed] = res
         log(f"    test cvar_95={res['test']['deterministic']['cvar_95']:.4f} "
             f"mean={res['test']['deterministic']['mean']:.4f} ({res['train_seconds']:.0f}s)")

@@ -1,0 +1,1 @@
+double_fee01 --paths-per-iter 100 --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward tracking --reward-norm none --no-obs-norm --no-adv-norm --value-loss huber --value-coef 1.0 --window 10 --pad-mode zero --no-agent-state --call-action-low -1 --underlying-fee 0.001 --option-fee 0.002 --actor-lr-range 1e-4 1e-4 --inactor-lr-range 1e-3 1e-3 --net double

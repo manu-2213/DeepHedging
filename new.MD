@@ -13,18 +13,69 @@ traps already hit.
 - The user cannot run things mid-task for you. Give them exact commands, saying which ones run on the
   **Mac** and which on the **HPC**.
 
-## Current state (as of 2026-11-01)
-- **v2.1 code:** in the working tree, **uncommitted**. Nothing from v2.0 or v2.1 has run on the HPC yet.
-  Only `py_compile` was run locally.
+## Current state (as of 2026-11-04)
+- **Results caveat:** 23 of 27 v2.1 runs were finished at the last pull, but early stopping censored most of
+  the training, so net comparisons are not valid yet. See "Interim results" in `paper_notes/findings.tex`.
+- **v2.1 code:** in the working tree, **uncommitted**, and the same code has run on the HPC.
 - **v1 results:** still on the HPC in `deep_hedging_v0/experiments/results/liquid_1_5/`. They used the
   old tracking reward, single vs double nets only, and the degenerate $1 digital. Some v1 Heston double
   runs may still be running, and `heston_doc_rnn_single` never started.
-- **Unverified Heston fix:** the adaptive `phi_max` fix has not run on torch or GPU. Do not trust any
-  Heston result until the smoke test prints `ALL PASSED` and the bank logs show no one-step drift
-  warnings.
+- **Heston fix:** the adaptive `phi_max` fix ran on the HPC and all Heston banks show zero warnings. The
+  smoke-test `ALL PASSED` line has not been read from the Mac, because `_smoke_*` and logs are not pulled.
+  The six BSM DOC validation warnings are false alarms (a 1-cent put that no path reaches).
 - **Slurm folder on the Mac:** the v1 folder `slurm/liquid_1_5` was archived to
   `slurm/old_pipeline/liquid_1_5_run1`. The HPC copy still has the old path until the user moves it
   (step 2 below).
+
+## Chained 1-hour jobs (v2.2, slurm folder `v2_2_5`)
+Use this for new runs. Each job works for 50 minutes on `gpushort`, saves its state to `results/v2_2_5/<name>/resume/`,
+and resubmits itself until the log prints `RUN FINISHED`. The engine keeps the old behaviour without `--time-budget-min`.
+
+**From the QMUL docs (read 2026-11-05):** a 1-hour request gives access to `gpushort`, and any user may submit there.
+The docs say queue time depends mostly on cores and RAM, and they recommend checkpointing for long work. They describe
+GPU jobs as 8 cores and 11 GB per core, so these jobs ask for 88 GB. The docs also describe `gpushort` as the place for
+testing, and they do not give its per-user limits.
+
+**1. On the HPC, before pushing:** check that no job is queued or running. A queued job would start on the new code.
+```bash
+squeue -u acw796
+```
+**2. On the Mac:** push the code with the rsync command in step 3 of the launch sequence below.
+
+**3. On the HPC, check that the job is accepted and see the limits:**
+```bash
+cd /data/home/acw796/DeepHedging/deep_hedging_v0/experiments/simulations/slurm/v2_2_5
+mkdir -p logs
+sbatch --test-only pilot_a_production.slurm
+scontrol show partition gpushort
+sacctmgr show assoc user=acw796 format=account,partition,qos,maxjobs,maxsubmit
+```
+If `sbatch` refuses the default account, regenerate with `ACCOUNT=pilot_sae_gpu bash make_slurm.sh`.
+
+**4. On the HPC, submit the checks and the pilot.** The pilot starts only if the checks pass:
+```bash
+bash submit_all.sh pilot
+```
+`logs/check_resume.<id>.out` must end with `ALL PASSED`. If it fails, the pilot jobs stay pending: `scancel` them. Read the pilot before submitting `main`.
+
+**Stopping:** no iteration cap and patience 2000 iterations, which is 5 old epochs.
+
+**Rates and stages:** main runs have no Optuna tuning: actor and joint rate 1e-5, inaction net 1e-3, seed 0 plus final seeds 1 2 3. Submit `first` (BSM call), check it, then `rest`. At 1.63 s per iteration the minimum is about 3.6 GPU hours per single or band run and 7.2 per double run, about 86 for all 18. Add seeds with `FINAL_SEEDS="1 2 3 4 5 6 7 8 9 10" bash make_slurm.sh` and resubmit: finished seeds are skipped.
+
+**Per-user GPU limit:** pending `gpushort` jobs show `QOSMaxGRESPerUser`, and two pilots ran at once (seen 2026-11-05). If the cap is 2 GPUs, the 86 GPU hours take about 2 days.
+
+**Chain traps:**
+- **GPU driver:** `gpushort` node `sbg2` has driver 12.9 (seen 2026-11-05), too old for the PyTorch build then in `.venv`. PyTorch fell back to the CPU at about 16 s per iteration, without an error. The job scripts now stop with exit code 3 when no GPU is usable. The fix is `torch==2.11.0+cu128`, the newest CUDA 12.8 build on 2026-11-05. It replaces 2.15.0+cu132, which v2.1 ran on. To go back, install `torch==2.15.0+cu132` from `https://download.pytorch.org/whl/cu132`.
+- **GPU type:** `sbg2` holds V100 cards, and `torch 2.11.0+cu128` has no code for them (`no kernel image is available`). The job scripts ask for `ampere|hopper` through `--constraint`. Override with `CONSTRAINT=... bash make_slurm.sh`.
+- **V100 cards:** `.venv_v100` (made 2026-11-05) holds `torch 2.11.0+cu126`, which includes V100 code (`sm_70`), plus numpy, scipy, optuna and pandas only. On the HPC, `probe_v100.slurm` is a copy of `probe_pack.slurm` that uses it with `--constraint=v100`, one probe per 16 GB card, at about 1.15 s per iteration. It runs `fast_hedging` only, not the old pipeline.
+- **Stale pilots:** rsync never deletes, and `submit_all.sh` globs `pilot_*.slurm`. Remove old pilot files on the HPC whenever the pilot list changes.
+- **Exit codes:** 75 means continue, 0 means finished, anything else stops the chain and leaves the state on disk.
+- **A broken chain:** a node failure or hard timeout stops the chain. Resubmit the same file: it continues from the last save, at most 100 iterations back.
+- **Stopping a run:** `scancel -n <name>`. A job already past its training can still resubmit once, so check `squeue` afterwards.
+- **Results are per run:** `job_count` in the results folder counts the jobs, and the chain stops at 1000.
+- **Mixed GPUs:** `gpushort` holds several GPU types, so a run may change type between jobs. Exact reproducibility needs the same hardware.
+- **Banks:** chained jobs reuse the HPC bank cache. A `BANK_VERSION` change needs `v2_1_5/build_banks.slurm` first, as its 8 hours do not fit one job.
+- **Old pipeline:** it has no resume support and stays frozen, so its jobs keep their long walltime.
 
 ## HPC facts
 | item | value |
@@ -125,7 +176,9 @@ After the bank job finishes, read its log: it greps the `WARNING` lines.
   ```bash
   rsync -avz --progress --exclude='*.pt' acw796@login.hpc.qmul.ac.uk:/data/home/acw796/DeepHedging/deep_hedging_v0/experiments/results/ ~/Desktop/PHD/DeepHedging/deep_hedging_v0/experiments/results/
   ```
-  Reading JSON and npz files locally is fine. Training is not.
+  Reading JSON and npz files locally is fine. Training is not. rsync only creates the last folder of the
+  target path, so run `mkdir -p` on it first if `results/` does not exist on the Mac. Run the report locally with
+  `/usr/local/bin/python3 -m fast_hedging.report experiments/results/v2_1_5` from `deep_hedging_v0/`.
 - **v1 comparison:** the v1 results in `results/liquid_1_5` use old run names without a reward suffix.
   `analysis._meta` treats those as `tracking`.
 

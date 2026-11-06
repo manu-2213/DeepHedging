@@ -34,12 +34,26 @@ class Encoder(nn.Module):
     'recurrent' : 2-layer LSTM run once over the whole path with its hidden state
                   carried forward, input (n, T, F) -> (n, T, h). Same network as
                   'window', but each step costs one LSTM step instead of W.
+    'transformer': 2-layer pre-norm transformer over the same sliding window, input
+                  (n, W, F) -> (n, h): linear embedding + learned position embedding,
+                  full attention inside the window (every token is already in the past),
+                  output of the last token. About the parameter count of the window LSTM.
     """
 
-    def __init__(self, mode, in_dim, hidden, activation="tanh"):
+    def __init__(self, mode, in_dim, hidden, activation="tanh", window=None):
         super().__init__()
         self.mode = mode
-        if mode == "mlp":
+        if mode == "transformer":
+            if not window:
+                raise ValueError("the transformer encoder needs the window length")
+            heads = next(k for k in (4, 3, 2, 1) if hidden % k == 0)
+            self.embed = nn.Linear(in_dim, hidden)
+            self.pos = nn.Parameter(0.02 * torch.randn(1, window, hidden))
+            layer = nn.TransformerEncoderLayer(hidden, heads, dim_feedforward=2 * hidden, dropout=0.0,
+                                               activation="gelu", batch_first=True, norm_first=True)
+            self.net = nn.TransformerEncoder(layer, num_layers=2, norm=nn.LayerNorm(hidden),
+                                             enable_nested_tensor=False)
+        elif mode == "mlp":
             act = nn.Tanh if activation == "tanh" else nn.ReLU
             self.net = nn.Sequential(nn.Linear(in_dim, hidden), act(), nn.Linear(hidden, hidden), act())
         elif mode in ("window", "recurrent"):
@@ -54,6 +68,8 @@ class Encoder(nn.Module):
     def forward(self, x):
         if self.mode == "mlp":
             return self.net(x)
+        if self.mode == "transformer":
+            return self.net(self.embed(x) + self.pos[:, -x.shape[1]:])[:, -1]
         out, _ = self.net(x)
         return out if self.mode == "recurrent" else out[:, -1]
 
@@ -88,9 +104,11 @@ class ActorCritic(nn.Module):
     """low/high: floats or per-dimension sequences of length action_dim.
     The 'band' net uses action_dim = 2 x instruments: [target positions, band half-widths]."""
 
-    def __init__(self, mode, obs_dim, action_dim, hidden, low, high, extra_dim=0):
+    def __init__(self, mode, obs_dim, action_dim, hidden, low, high, extra_dim=0, init_std=None, window=None):
         super().__init__()
-        self.encoder = Encoder(mode, obs_dim, hidden, "tanh")
+        # init_std: policy noise of an untrained net (None: about 1.0, the old default)
+        self.scale_bias = _SCALE_BIAS if init_std is None else math.log(math.expm1(init_std - 0.01))
+        self.encoder = Encoder(mode, obs_dim, hidden, "tanh", window)
         self.policy = nn.Linear(hidden + extra_dim, 2 * action_dim)
         self.value = nn.Sequential(nn.Linear(hidden + extra_dim, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
         bound = lambda x: torch.as_tensor(x, dtype=torch.float32).expand(action_dim).clone()
@@ -103,16 +121,16 @@ class ActorCritic(nn.Module):
     def heads(self, feat, extra=None):
         h = feat if extra is None else torch.cat([feat, extra], dim=-1)
         loc, raw = self.policy(h).chunk(2, dim=-1)
-        scale = (F.softplus(raw + _SCALE_BIAS) + 0.01).clamp_min(1e-4)
+        scale = (F.softplus(raw + self.scale_bias) + 0.01).clamp_min(1e-4)
         return SquashedNormal(loc, scale, self.act_low, self.act_high), self.value(h).squeeze(-1)
 
 
 class Inactor(nn.Module):
     """Bernoulli 'hold previous position' decision (1 = do not trade)."""
 
-    def __init__(self, mode, obs_dim, hidden, extra_dim=0, init_hold_prob=None):
+    def __init__(self, mode, obs_dim, hidden, extra_dim=0, init_hold_prob=None, window=None):
         super().__init__()
-        self.encoder = Encoder(mode, obs_dim, hidden, "relu")
+        self.encoder = Encoder(mode, obs_dim, hidden, "relu", window)
         self.policy = nn.Linear(hidden + extra_dim, 1)
         self.value = nn.Sequential(nn.Linear(hidden + extra_dim, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
         self.extra_dim = extra_dim

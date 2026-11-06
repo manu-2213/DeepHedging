@@ -1,5 +1,26 @@
 # fast_hedging: notes, findings and how to run
 
+## v2.2 (chained 1-hour jobs; slurm folder `v2_2_5`, results `experiments/results/v2_2_5/`)
+- `--time-budget-min M`: after M minutes the run saves everything and exits with code 75. The same command continues.
+  Without the flag, behaviour and results are unchanged.
+- Saved per seed in `<out>/resume/`: weights, optimizers, random generators, running VaR, best weights, stopping
+  counters and logs. Saved every 100 iterations and at the deadline, by atomic replace.
+- An interrupted Optuna trial keeps its number, parameters and pruning reports (RUNNING goes back to WAITING).
+  A trial with no saved state is marked failed, as before.
+- Chained jobs reseed the Optuna sampler from the trial count. The same seed in each job would redraw the first
+  job's learning rates. `--tuning-hours` adds up over the jobs (`tuning_clock.json`).
+- Test-set blocks for the best trial and the baselines run once and are kept as JSON.
+- Stopping in `v2_2_5`: no iteration cap and patience 2000 iterations (`--patience 200`, checks every 10). That is 5
+  old epochs, as one old epoch is 400 episodes and one episode is one rollout, like one iteration here. By gradient
+  steps the old pipeline's 5 epochs would be only about 105 iterations, because an old episode makes 4 steps and an
+  iteration about 76. The rollout count was chosen.
+- Learning rates in `v2_2_5` main runs are fixed, not tuned: actor and joint 1e-5 (the author's experience with these
+  RNNs), inaction net 1e-3 (the old default). The old call script defaults to 5e-6, while v2.1 selected 5.85e-4 on BSM call
+  under censored stopping, which favours fast rates. Runs go in stages, BSM call first, with 3 final seeds to start.
+- `--prune-warmup N` stops pruning before N validation checks in each phase of the double net, for any later tuning.
+- PyTorch: `v2_2_5` runs on 2.11.0+cu128, as `gpushort` node `sbg2` has driver 12.9. v2.1 ran on 2.15.0+cu132.
+- New flags with old defaults: `--value-coef`, `--init-std` and `--prune-warmup`. Check with `python -m fast_hedging.tests.test_resume`.
+
 ## v2.1 (fixes after the second audit, 1 November 2026; slurm folder `v2_1_5`)
 Found by reading the v2.0 code and checking the Heston pricer against a complex128 reference.
 `BANK_VERSION` is 4: every cached bank is rebuilt. Full write-up: `paper_notes/findings.tex`.
