@@ -87,6 +87,7 @@ class RunCheckpoint:
 @dataclass
 class TrainConfig:
     arch: str = "rnn"                 # rnn | mlp | transformer (attention over the same window as rnn_mode=window)
+                                      # | tfpath (fast transformer: one causal pass per path, window-wide attention)
     rnn_mode: str = "window"          # window: LSTM over the last `window` steps | recurrent: whole path
     net: str = "single"               # single | band | double
     window: int = 8                   # history_len: observations the window LSTM sees (t-7..t)
@@ -99,6 +100,9 @@ class TrainConfig:
     normalize_adv: bool = True
     mask_held_actor_loss: bool = True # do not credit the actor for actions that were never executed
     inactor_init_hold_prob: float | None = None
+    actor_hold_dropout: float = 0.0   # actor phase, training rollouts only: forced holds. Each market path draws a hold
+                                      # probability in [0, this] and the actor's trade is skipped at random steps, so the
+                                      # actor sees holdings away from its target before the inactor exists (0 = off)
     reward: str = "mean_cvar"         # mean_cvar | tracking (see module docstring)
     cvar_alpha: float = 0.95
     cvar_lambda: float = 1.0          # weight of CVaR against expected P&L in mean_cvar
@@ -143,6 +147,8 @@ class TrainConfig:
             raise ValueError(f"unknown net {self.net}")
         if self.reward not in ("mean_cvar", "tracking"):
             raise ValueError(f"unknown reward {self.reward}")
+        if self.metric not in ("cvar_95", "mean_abs_tracking_error"):
+            raise ValueError(f"unknown metric {self.metric}")
         if self.advantage not in ("gae", "grpo"):
             raise ValueError(f"unknown advantage {self.advantage}")
         if self.advantage == "grpo" and self.grpo_group < 2:
@@ -151,6 +157,8 @@ class TrainConfig:
             raise ValueError(f"unknown value_loss {self.value_loss}")
         if self.pad_mode not in ("edge", "zero"):
             raise ValueError(f"unknown pad_mode {self.pad_mode}")
+        if not 0.0 <= self.actor_hold_dropout < 1.0:
+            raise ValueError("actor_hold_dropout must be in [0, 1)")
 
 
 def action_bounds(product, call_low=0.0):
@@ -158,7 +166,7 @@ def action_bounds(product, call_low=0.0):
 
 
 def encoder_mode(cfg: TrainConfig) -> str:
-    if cfg.arch in ("mlp", "transformer"):
+    if cfg.arch in ("mlp", "transformer", "tfpath"):
         return cfg.arch
     return cfg.rnn_mode
 
@@ -314,6 +322,12 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
                 rec["xi"] = z(inactor_state_dim(A))
     abs_err = torch.zeros(B, device=dev)
     holds = torch.zeros(B, device=dev)
+    forced = None
+    if record and not use_inactor and cfg.actor_hold_dropout > 0:
+        # one mask per market path, shared by its GRPO copies, so copies still differ only in their actions
+        g = cfg.grpo_group if (cfg.advantage == "grpo" and B % cfg.grpo_group == 0) else 1
+        p_hold = torch.rand(B // g, 1, device=dev, generator=gen) * cfg.actor_hold_dropout
+        forced = (torch.rand(B // g, N, device=dev, generator=gen) < p_hold).float().repeat_interleave(g, dim=0)
     n_trades = torch.zeros(B, device=dev)
     tr = None
     if trace:
@@ -335,6 +349,9 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
             final = torch.maximum(torch.minimum(pos, a + width), a - width)
         else:
             final = a
+        if forced is not None:
+            final = torch.where(forced[:, t:t + 1] > 0.5, pos, final)
+            holds += forced[:, t]
         if use_inactor:
             xi = None
             if cfg.agent_state:
@@ -361,7 +378,7 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
                 rec["reward"][:, t] = -err * scale
             else:                   # P&L increment; terminal CVaR penalty added in train_phase
                 rec["reward"][:, t] = ((pv - L[:, t + 1]) - pnl_before) * scale
-            rec["executed"][:, t] = 1.0 if not use_inactor else 1.0 - hold
+            rec["executed"][:, t] = (1.0 - hold) if use_inactor else (1.0 if forced is None else 1.0 - forced[:, t])
             if cfg.agent_state:
                 rec["xa"][:, t] = xa
             if use_inactor:
@@ -474,7 +491,8 @@ def update(agent: Agent, task: Task, data, rec, *, which, opt, gen=None):
     B, N = rec["reward"].shape
     if which == "actor":
         model, value_old, logp_old = agent.actor, rec["value"], rec["logp"]
-        mask = rec["executed"] if (cfg.mask_held_actor_loss and "hold" in rec) else torch.ones_like(value_old)
+        held = "hold" in rec or cfg.actor_hold_dropout > 0     # inactor holds, or forced holds in the actor phase
+        mask = rec["executed"] if (cfg.mask_held_actor_loss and held) else torch.ones_like(value_old)
         state = rec.get("xa")
     else:
         model, value_old, logp_old = agent.inactor, rec["i_value"], rec["hold_logp"]
@@ -688,6 +706,7 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
             log(f"  [{phase}] it {it:5d}  val {cfg.metric}={metric:.4f}  best={best:.4f}  "
                 f"hold={m['hold_rate']:.3f}  cost={m['mean_cost']:.2f}  bad={bad}/{cfg.patience}  "
                 f"{(time.time() - t0) / it:.2f}s/it | track={m['mean_abs_tracking_error']:.2f} trades={m['mean_trades']:.0f} "
+                f"vcvar={m['cvar_95']:.2f} "
                 f"train: rew={entry['train_reward']:.3f} cvar={entry['train_cvar_95']:.1f} err={entry['train_abs_err']:.2f} "
                 f"cost={entry['train_cost']:.1f} std={entry.get('actor_policy_spread', float('nan')):.3f} "
                 f"ev={entry.get('actor_explained_variance', float('nan')):.2f}")
@@ -739,6 +758,25 @@ def env_index(task: Task):
 # Reference strategies on the same paths (sanity baselines)
 # --------------------------------------------------------------------------
 @torch.no_grad()
+def ww_target_band(task: Task, idx, k):
+    """Whalley-Wilmott strategy on paths `idx`: BS delta target and half-width
+    H = k * (exp(-r tau) lam S Gamma^2)^(1/3), lam = underlying fee. Both (B, N, 1), B = len(idx) * A * M."""
+    if task.sigma is None or task.product != "call":
+        raise ValueError("ww_band is defined for the Black-Scholes call only")
+    n = idx.numel()
+    B = n * task.A * task.M
+    S = task.S[idx][:, :, None, :task.N].expand(n, task.A, task.M, task.N).double()
+    Kx = task.K[None, :, :, None].double()
+    tau = task.T[None, None, None, :task.N].double().clamp_min(1e-6)
+    sig = task.sigma[None, :, None, None].double()
+    d1 = (torch.log(S / Kx) + (task.r + 0.5 * sig**2) * tau) / (sig * torch.sqrt(tau))
+    target = (0.5 * (1 + torch.erf(d1 / math.sqrt(2.0)))).float().reshape(B, task.N, 1)
+    gamma = torch.exp(-0.5 * d1**2) / math.sqrt(2 * math.pi) / (S * sig * torch.sqrt(tau))
+    lam = float(task.fees[0])
+    band = (float(k) * (torch.exp(-task.r * tau) * lam * S * gamma**2) ** (1.0 / 3.0))
+    return target, band.float().reshape(B, task.N, 1)
+
+
 def evaluate_baseline(task: Task, kind: str, param=None, chunk=256):
     """Classical strategies on the same paths and costs as the agents.
 
@@ -752,7 +790,7 @@ def evaluate_baseline(task: Task, kind: str, param=None, chunk=256):
                    to the nearest band edge, half-width H = param * (exp(-r tau) lam S Gamma^2)^(1/3),
                    lam = underlying fee; param absorbs the unknown risk aversion (tune on validation).
     Returns (metrics, per-env arrays)."""
-    pnls, costs, trades = [], [], []
+    pnls, costs, trades, errs = [], [], [], []
     for lo in range(0, task.P, chunk):
         idx = torch.arange(lo, min(task.P, lo + chunk), device=task.device)
         k = idx.numel()
@@ -771,24 +809,14 @@ def evaluate_baseline(task: Task, kind: str, param=None, chunk=256):
                 raise ValueError("mv_delta needs a Heston call bank with stored minimum-variance deltas")
             target = task.Dmv[idx][..., :task.N].reshape(B, task.N, 1)
         elif kind == "ww_band":
-            if task.sigma is None or task.product != "call":
-                raise ValueError("ww_band is defined for the Black-Scholes call only")
-            S = task.S[idx][:, :, None, :task.N].expand(k, task.A, task.M, task.N).double()
-            Kx = task.K[None, :, :, None].double()
-            tau = task.T[None, None, None, :task.N].double().clamp_min(1e-6)
-            sig = task.sigma[None, :, None, None].double()
-            d1 = (torch.log(S / Kx) + (task.r + 0.5 * sig**2) * tau) / (sig * torch.sqrt(tau))
-            target = (0.5 * (1 + torch.erf(d1 / math.sqrt(2.0)))).float().reshape(B, task.N, 1)
-            gamma = torch.exp(-0.5 * d1**2) / math.sqrt(2 * math.pi) / (S * sig * torch.sqrt(tau))
-            lam = float(task.fees[0])
-            band = (float(param) * (torch.exp(-task.r * tau) * lam * S * gamma**2) ** (1.0 / 3.0))
-            band = band.float().reshape(B, task.N, 1)
+            target, band = ww_target_band(task, idx, param)
         else:
             raise ValueError(kind)
         pos = torch.zeros(B, task.I, device=task.device)
         cash = L[:, 0].clone()
         cost_tot = torch.zeros(B, device=task.device)
         n_tr = torch.zeros(B, device=task.device)
+        abs_err = torch.zeros(B, device=task.device)     # same definition as rollout: mean_t |PV_t+1 - L_t+1|
         for t in range(task.N):
             final = target[:, t]
             if band is not None:
@@ -800,15 +828,16 @@ def evaluate_baseline(task: Task, kind: str, param=None, chunk=256):
             pos = final
             cost_tot += cost
             n_tr += (trade.abs().amax(-1) > 1e-6).float()
+            abs_err += (cash + (pos * X[:, t + 1]).sum(-1) - L[:, t + 1]).abs()
         pv = cash + (pos * X[:, task.N]).sum(-1)
-        pnls.append((pv - L[:, task.N]).cpu()); costs.append(cost_tot.cpu()); trades.append(n_tr.cpu())
-    pnl, cost, n_trades = (torch.cat(v).numpy() for v in (pnls, costs, trades))
+        pnls.append((pv - L[:, task.N]).cpu()); costs.append(cost_tot.cpu()); trades.append(n_tr.cpu()); errs.append((abs_err / task.N).cpu())
+    pnl, cost, n_trades, abs_err = (torch.cat(v).numpy() for v in (pnls, costs, trades, errs))
     m = risk_metrics(pnl)
-    m.update({"mean_cost": float(cost.mean()), "mean_trades": float(n_trades.mean()),
+    m.update({"mean_abs_tracking_error": float(abs_err.mean()), "mean_cost": float(cost.mean()), "mean_trades": float(n_trades.mean()),
               "no_trade_rate": float(1.0 - n_trades.mean() / task.N)})
     if param is not None:
         m["param"] = float(param)
-    return m, {"pnl": pnl, "cost": cost, "n_trades": n_trades}
+    return m, {"pnl": pnl, "cost": cost, "n_trades": n_trades, "abs_err": abs_err}
 
 
 WW_GRID = tuple(float(x) for x in np.geomspace(0.25, 64.0, 17))

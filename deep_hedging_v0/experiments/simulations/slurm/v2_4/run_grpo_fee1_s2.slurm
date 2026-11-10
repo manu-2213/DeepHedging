@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --nice=500
 #SBATCH --job-name=v24_grpo_fee1_s2
 #SBATCH --output=logs/%x.%j.out
 #SBATCH --error=logs/%x.%j.err

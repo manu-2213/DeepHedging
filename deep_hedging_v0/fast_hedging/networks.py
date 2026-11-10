@@ -38,6 +38,11 @@ class Encoder(nn.Module):
                   (n, W, F) -> (n, h): linear embedding + learned position embedding,
                   full attention inside the window (every token is already in the past),
                   output of the last token. About the parameter count of the window LSTM.
+    'tfpath'    : the fast transformer. One causal pass over the whole path, input (n, T, F) -> (n, T, h):
+                  token t attends to tokens t-W+1..t, with a learned bias per head and per lag in place
+                  of position embeddings. Every observation is encoded once instead of W times (about
+                  5-18x faster than 'transformer' in fast_hedging/tests/bench_transformer.py). Not the same
+                  model: with 2 layers, step t sees up to 2(W-1) steps back.
     """
 
     def __init__(self, mode, in_dim, hidden, activation="tanh", window=None):
@@ -53,6 +58,19 @@ class Encoder(nn.Module):
                                                activation="gelu", batch_first=True, norm_first=True)
             self.net = nn.TransformerEncoder(layer, num_layers=2, norm=nn.LayerNorm(hidden),
                                              enable_nested_tensor=False)
+        elif mode == "tfpath":
+            if not window:
+                raise ValueError("the tfpath encoder needs the window length")
+            self.window = window
+            self.heads = next(k for k in (4, 3, 2, 1) if hidden % k == 0)
+            self.embed = nn.Linear(in_dim, hidden)
+            self.blocks = nn.ModuleList(nn.ModuleDict({
+                "n1": nn.LayerNorm(hidden), "qkv": nn.Linear(hidden, 3 * hidden), "out": nn.Linear(hidden, hidden),
+                "n2": nn.LayerNorm(hidden),
+                "ff": nn.Sequential(nn.Linear(hidden, 2 * hidden), nn.GELU(), nn.Linear(2 * hidden, hidden)),
+            }) for _ in range(2))
+            self.lag_bias = nn.Parameter(torch.zeros(2, self.heads, window))   # zero: uniform over the window at start
+            self.net = nn.LayerNorm(hidden)                                    # final norm
         elif mode == "mlp":
             act = nn.Tanh if activation == "tanh" else nn.ReLU
             self.net = nn.Sequential(nn.Linear(in_dim, hidden), act(), nn.Linear(hidden, hidden), act())
@@ -63,13 +81,32 @@ class Encoder(nn.Module):
 
     @property
     def sequential(self):
-        return self.mode == "recurrent"
+        return self.mode in ("recurrent", "tfpath")
+
+    def _band_bias(self, layer, T, device, dtype):
+        """(heads, T, T) additive attention mask: lag_bias[lag] for 0 <= t-s < W, -inf elsewhere."""
+        lag = torch.arange(T, device=device)[:, None] - torch.arange(T, device=device)[None, :]
+        inside = (lag >= 0) & (lag < self.window)
+        bias = self.lag_bias[layer][:, lag.clamp(0, self.window - 1)].to(dtype)
+        return bias.masked_fill(~inside, float("-inf"))
+
+    def _tfpath(self, x):
+        B, T, _ = x.shape
+        h = self.embed(x)
+        for i, blk in enumerate(self.blocks):
+            q, k, v = blk["qkv"](blk["n1"](h)).view(B, T, 3, self.heads, -1).permute(2, 0, 3, 1, 4)
+            a = F.scaled_dot_product_attention(q, k, v, attn_mask=self._band_bias(i, T, x.device, q.dtype))
+            h = h + blk["out"](a.transpose(1, 2).reshape(B, T, -1))
+            h = h + blk["ff"](blk["n2"](h))
+        return self.net(h)
 
     def forward(self, x):
         if self.mode == "mlp":
             return self.net(x)
         if self.mode == "transformer":
             return self.net(self.embed(x) + self.pos[:, -x.shape[1]:])[:, -1]
+        if self.mode == "tfpath":
+            return self._tfpath(x)
         out, _ = self.net(x)
         return out if self.mode == "recurrent" else out[:, -1]
 

@@ -46,10 +46,14 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dynamics", choices=("bsm", "heston"), required=True)
     p.add_argument("--product", choices=("call", "doc", "con"), required=True)
-    p.add_argument("--arch", choices=("mlp", "rnn", "transformer"), default="rnn",
-                   help="transformer: attention over the same --window as the window LSTM")
+    p.add_argument("--arch", choices=("mlp", "rnn", "transformer", "tfpath"), default="rnn",
+                   help="transformer: attention over the same --window as the window LSTM; "
+                        "tfpath: fast transformer, one causal pass per path with --window-wide attention")
     p.add_argument("--advantage", choices=("gae", "grpo"), help="gae (critic, default) | grpo (no critic, group-relative)")
     p.add_argument("--grpo-group", type=int, help="grpo: copies of each path per iteration (default 4)")
+    p.add_argument("--metric", choices=("cvar_95", "mean_abs_tracking_error"),
+                   help="validation metric for selection, rate cuts and early stopping (default cvar_95); "
+                        "also the criterion the Whalley-Wilmott band scale is tuned on")
     p.add_argument("--grpo-norm", choices=("group", "none"), help="grpo: divide by the group std (default group)")
     p.add_argument("--rnn-mode", choices=("window", "recurrent"), default="window",
                    help="window: LSTM over the last --window observations (history_len, default 8); "
@@ -105,6 +109,8 @@ def parse_args(argv=None):
     p.add_argument("--no-agent-state", action="store_true",
                    help="old inputs only: hide holdings, tracking error, costs, time since trade, proposed trade")
     p.add_argument("--inactor-init-hold-prob", type=float)
+    p.add_argument("--actor-hold-dropout", type=float,
+                   help="actor phase: forced holds in training rollouts, hold probability per path in [0, this] (default 0 = off)")
     p.add_argument("--reward-norm", choices=("premium", "spot", "none"))
     p.add_argument("--no-obs-norm", action="store_true"); p.add_argument("--no-adv-norm", action="store_true")
     p.add_argument("--credit-held-actions", action="store_true",
@@ -129,9 +135,9 @@ def make_config(a) -> TrainConfig:
                       cvar_per_asset=not a.cvar_pooled)
     over = {k.replace("-", "_"): getattr(a, k.replace("-", "_")) for k in
             ("paths-per-iter", "ppo-epochs", "minibatch", "eval-every", "patience", "max-iters", "min-iters",
-             "window", "hidden", "actor-update-every", "lr-patience", "lr-decays", "lr-decay-factor", "min-rel-improvement", "inactor-init-hold-prob",
+             "window", "hidden", "actor-update-every", "lr-patience", "lr-decays", "lr-decay-factor", "min-rel-improvement", "inactor-init-hold-prob", "actor-hold-dropout",
              "reward-norm", "cvar-lambda", "lmbda", "value-loss", "pad-mode", "value-coef", "init-std", "call-action-low",
-             "advantage", "grpo-group", "grpo-norm")}
+             "advantage", "grpo-group", "grpo-norm", "metric")}
     cfg = replace(cfg, **{k: v for k, v in over.items() if v is not None})
     if a.target_kl is not None:
         cfg = replace(cfg, target_kl=a.target_kl if a.target_kl > 0 else None)
@@ -458,7 +464,7 @@ def run(a):
         if a.product == "call" and a.dynamics == "heston":
             plan.append(("mv_delta", None))             # Heston minimum-variance delta (spot + correlated vol move)
         if a.product == "call" and a.dynamics == "bsm":
-            k_ww, ww_scores = tune_ww_band(tasks[1])     # band scale chosen on validation only
+            k_ww, ww_scores = tune_ww_band(tasks[1], metric=cfg.metric)   # band scale chosen on validation only
             log(f"Whalley-Wilmott band scale chosen on validation: {k_ww:.3g}")
             plan.append(("ww_band", k_ww))
         for kind, param in plan:
@@ -469,7 +475,8 @@ def run(a):
         np.savez_compressed(a.out / "baselines_test_paths.npz", **base_arrays, **test_index)
         return baselines
     baselines = once("baselines_test", baselines_block)
-    log("test baselines: " + ", ".join(f"{k} cvar_95={v['cvar_95']:.2f}" for k, v in baselines.items()))
+    log("test baselines: " + ", ".join(f"{k} cvar_95={v['cvar_95']:.2f} track={v.get('mean_abs_tracking_error', float('nan')):.2f} "
+                                       f"cost={v['mean_cost']:.2f}" for k, v in baselines.items()))
 
     # Final seeds with the best hyper-parameters.
     finals = {}

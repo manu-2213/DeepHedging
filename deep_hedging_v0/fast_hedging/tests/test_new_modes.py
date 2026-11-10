@@ -7,7 +7,8 @@
   3. the default config still builds the same window LSTM (no new parameters).
   4. exact resume (split run == whole run) for transformer and GRPO, single / band / double nets.
   5. the whole experiment under a tiny time budget, on the GPU when there is one, for the transformer
-     with GRPO and the band net.
+     with GRPO and the band net (and the same for the fast 'tfpath' transformer).
+  6. tfpath is causal (step t never sees later observations) and its reach is 2(W-1) steps back.
 
 Usage (from deep_hedging_v0/):   python -m fast_hedging.tests.test_new_modes
 """
@@ -17,6 +18,7 @@ import tempfile
 import torch
 
 from fast_hedging.experiment import SPLIT_SEEDS
+from fast_hedging.networks import Encoder
 from fast_hedging.market import MarketSpec, get_bank
 from fast_hedging.ppo import Agent, Task, TrainConfig, grpo_advantages, repeat_groups, rollout
 from fast_hedging.tests.test_resume import SIZES, check_chain, check_exact
@@ -75,17 +77,42 @@ def check_default_unchanged():
     print(f"default net unchanged (window LSTM, {n} actor parameters; transformer {nt})", flush=True)
 
 
+def check_tfpath_reach():
+    torch.manual_seed(0)
+    W, T = 4, 20
+    enc = Encoder("tfpath", 11, 16, window=W)
+    with torch.no_grad():
+        enc.lag_bias.normal_()
+        x = torch.randn(3, T, 11)
+        base = enc(x)
+        y = x.clone(); y[:, 9] += 5.0                      # change step 9 only
+        diff = (enc(y) - base).abs().amax(dim=(0, 2))
+    assert diff[:9].max() == 0, "tfpath looks ahead: steps before 9 changed"
+    assert diff[9] > 0, "step 9 does not see its own observation"
+    reach = 2 * (W - 1)
+    assert diff[9 + reach] > 0, f"step {9 + reach} should still see step 9"
+    assert diff[9 + reach + 1:].max() == 0, f"tfpath sees more than {reach} steps back"
+    print(f"tfpath causal, reach {reach} steps back (W={W})", flush=True)
+
+
 if __name__ == "__main__":
     torch.set_num_threads(2)
     check_grpo_math()
     check_groups()
     check_default_unchanged()
+    check_tfpath_reach()
     with tempfile.TemporaryDirectory() as tmp:
         for net, stops in (("single", [3]), ("band", [2, 5]), ("double", [3, 11])):
             check_exact(net, stops, tmp, arch="transformer", window=10)
             check_exact(net, stops, tmp, advantage="grpo", grpo_group=2)
         check_exact("band", [2, 5], tmp, arch="transformer", window=10, advantage="grpo", grpo_group=3)
+        for net, stops in (("single", [3]), ("band", [2, 5]), ("double", [3, 11])):
+            check_exact(net, stops, tmp, arch="tfpath", window=10)
+        check_exact("band", [2, 5], tmp, arch="tfpath", window=10, advantage="grpo", grpo_group=3)
         check_chain("band", tmp, ("--n-trials", "1", "--no-pruning", "--arch", "transformer", "--window", "10",
+                                  "--advantage", "grpo", "--grpo-group", "2"))
+    with tempfile.TemporaryDirectory() as tmp:
+        check_chain("band", tmp, ("--n-trials", "1", "--no-pruning", "--arch", "tfpath", "--window", "10",
                                   "--advantage", "grpo", "--grpo-group", "2"))
     print("ALL PASSED")
     sys.exit(0)

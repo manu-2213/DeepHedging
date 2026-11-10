@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --nice=200
 #SBATCH --job-name=v24_tf_fee1_s1
 #SBATCH --output=logs/%x.%j.out
 #SBATCH --error=logs/%x.%j.err
