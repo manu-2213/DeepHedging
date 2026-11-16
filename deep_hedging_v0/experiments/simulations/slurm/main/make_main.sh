@@ -22,7 +22,7 @@ mkdir -p logs
 RES=experiments/results/main
 RESABS=${DEEP_HEDGING_REPO:-/data/home/acw796/DeepHedging}/deep_hedging_v0/$RES
 COMMON="--n-trials 1 --no-pruning --final-seeds --arch tfpath --rnn-mode window --ppo-epochs 1 --minibatch 125000 --target-kl 0 --reward tracking --reward-norm none --no-obs-norm --no-adv-norm --value-loss huber --value-coef 1.0 --window 10 --pad-mode zero --no-agent-state --call-action-low -1 --train-paths 2000 --val-paths 500 --test-paths 2000 --max-iters 1000000000 --patience 200 --lr-patience 50 --lr-decays 3 --lr-decay-factor 0.5 --time-budget-min 50 --advantage grpo --grpo-group 8 --paths-per-iter 12 --metric mean_abs_tracking_error"
-TUNE_LRS="3e-5 1e-4 3e-4"
+TUNE_LRS="3e-5 1e-4 3e-4 1e-3 3e-3"
 fee_args() { case "$1" in 01) echo "--underlying-fee 0.001 --option-fee 0.002";; 1) echo "--underlying-fee 0.01 --option-fee 0.05 --init-std 0.2";; *) echo "bad fee $1" >&2; exit 2;; esac; }
 tag() { echo "${1/-/}"; }     # 1e-4 -> 1e4
 
@@ -33,7 +33,7 @@ emit() {   # name, python args, on-finish shell (may be empty)
 #SBATCH --job-name=mn_$name
 #SBATCH --output=logs/%x.%j.out
 #SBATCH --error=logs/%x.%j.err
-#SBATCH --partition=gpushort,sae
+#SBATCH --partition=sae
 #SBATCH --account=pilot_sae_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
@@ -78,9 +78,32 @@ single() {   # dyn prod fee seed lr [tune]
   [ "${6:-}" = tune ] && finish="bash make_main.sh pick $dyn $prod $fee"
   emit $name "--dynamics $dyn --product $prod --net single --actor-lr-range $lr $lr --inactor-lr-range 1e-3 1e-3 --tuning-seeds $seed $(fee_args $fee) $COMMON" "$finish"
 }
-double() {   # dyn prod fee seed il jl single_run_name
+band() {     # dyn prod fee seed lr: the band net (actor outputs target + no-trade half-width; Imaki et al.-style), one stage, same rate as the seed's single
+  local dyn=$1 prod=$2 fee=$3 seed=$4 lr=$5 name
+  name=${dyn}_${prod}_fee${fee}_band_lr$(tag $lr)_s$seed
+  emit $name "--dynamics $dyn --product $prod --net band --actor-lr-range $lr $lr --inactor-lr-range 1e-3 1e-3 --tuning-seeds $seed $(fee_args $fee) $COMMON" ""
+}
+pair() {     # dyn prod fee seed lr il jl: parameter-parity Actor-Inactor, trained from scratch: stage 1 trains its own actor at width
+             # int(64/sqrt2)=45 at rate lr, stage 2 adds a 45-wide inactor (il) and trains jointly (actor jl); 45+45 = one 64 single net
+  local dyn=$1 prod=$2 fee=$3 seed=$4 lr=$5 il=$6 jl=$7 name
+  name=${dyn}_${prod}_fee${fee}_pair_i$(tag $il)_j$(tag $jl)_lr$(tag $lr)_s$seed
+  emit $name "--dynamics $dyn --product $prod --net double --actor-init train --tune-joint-lr --actor-lr-range $lr $lr --inactor-lr-range $il $il --joint-lr-range $jl $jl --tuning-seeds $seed $(fee_args $fee) $COMMON" ""
+}
+gate() {     # dyn prod fee seed il jl single_run_name: the main Actor-Inactor recipe (actor from the single, 64+64) but the inactor
+             # also sees [holding, proposal, gap, estimated cost] (--inactor-proposal). Isolates the value of the proposal input.
   local dyn=$1 prod=$2 fee=$3 seed=$4 il=$5 jl=$6 src=$7 name
-  name=${dyn}_${prod}_fee${fee}_double_i$(tag $il)_j$(tag $jl)_s$seed
+  name=${dyn}_${prod}_fee${fee}_gate_i$(tag $il)_j$(tag $jl)_s$seed
+  emit $name "--dynamics $dyn --product $prod --net double --inactor-proposal --actor-lr-range 1e-4 1e-4 --inactor-lr-range $il $il --joint-lr-range $jl $jl --actor-init from-single --single-dir experiments/results/$src --tuning-seeds $seed $(fee_args $fee) $COMMON" ""
+}
+xfer() {     # dyn prod fee seed il single_run_name: liquidity transfer. The actor is loaded from a single trained at ANOTHER fee
+             # (e.g. the 0.1% single) and frozen (--freeze-actor); only the proposal-aware inactor is trained, at this fee.
+  local dyn=$1 prod=$2 fee=$3 seed=$4 il=$5 src=$6 name
+  name=${dyn}_${prod}_fee${fee}_xfer_i$(tag $il)_s$seed
+  emit $name "--dynamics $dyn --product $prod --net double --inactor-proposal --freeze-actor --actor-lr-range 1e-4 1e-4 --inactor-lr-range $il $il --joint-lr-range 1e-4 1e-4 --actor-init from-single --single-dir experiments/results/$src --tuning-seeds $seed $(fee_args $fee) $COMMON" ""
+}
+double() {   # dyn prod fee seed il jl single_run_name [fromtag]   (fromtag marks a double started from the seed's second-rate single)
+  local dyn=$1 prod=$2 fee=$3 seed=$4 il=$5 jl=$6 src=$7 name
+  name=${dyn}_${prod}_fee${fee}_double_i$(tag $il)_j$(tag $jl)${8:+_from$8}_s$seed
   [ -n "$src" ] || { echo "double needs the single run name" >&2; exit 2; }
   emit $name "--dynamics $dyn --product $prod --net double --actor-lr-range 1e-4 1e-4 --inactor-lr-range $il $il --joint-lr-range $jl $jl --actor-init from-single --single-dir $RES/$src --tuning-seeds $seed $(fee_args $fee) $COMMON" ""
 }
@@ -91,7 +114,11 @@ grid() {     # dyn prod fee single_run_name
 case "$1" in
   single) single $2 $3 $4 $5 $6 ${7:-} ;;
   tune)   for lr in $TUNE_LRS; do single $2 $3 $4 1 $lr tune; done ;;
-  double) double $2 $3 $4 $5 $6 $7 $8 ;;
+  double) double $2 $3 $4 $5 $6 $7 $8 ${9:-} ;;
+  band)   band $2 $3 $4 $5 $6 ;;
+  gate)   gate $2 $3 $4 $5 $6 $7 $8 ;;
+  xfer)   xfer $2 $3 $4 $5 $6 $7 ;;
+  pair)   pair $2 $3 $4 $5 $6 $7 $8 ;;
   grid)   grid $2 $3 $4 $5 ;;
   pick)
     dyn=$2; prod=$3; fee=$4; best=""; bestv=""
@@ -106,6 +133,22 @@ case "$1" in
     echo "pick: $dyn $prod fee$fee -> $best ($bestv); submitting the double grid"
     echo "$best $bestv $(date)" > "picked_${dyn}_${prod}_fee${fee}/choice.txt"
     for f in $(grid $dyn $prod $fee $best); do sbatch "$f"; done ;;
+  seed2chain)   # dyn prod fee seed lr1 lr2 il jl: the seed's second-rate single; on finish, a double from it iff it beats the first-rate single on validation
+    dyn=$2; prod=$3; fee=$4; seed=$5; lr1=$6; lr2=$7; il=$8; jl=$9
+    sname=${dyn}_${prod}_fee${fee}_single_lr$(tag $lr2)_s$seed
+    emit $sname "--dynamics $dyn --product $prod --net single --actor-lr-range $lr2 $lr2 --inactor-lr-range 1e-3 1e-3 --tuning-seeds $seed $(fee_args $fee) $COMMON" "bash make_main.sh maybe_double $dyn $prod $fee $seed $lr1 $lr2 $il $jl" ;;
+  maybe_double)
+    dyn=$2; prod=$3; fee=$4; seed=$5; lr1=$6; lr2=$7; il=$8; jl=$9
+    s1=${dyn}_${prod}_fee${fee}_single_lr$(tag $lr1)_s$seed; s2=${dyn}_${prod}_fee${fee}_single_lr$(tag $lr2)_s$seed
+    v2=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['best_val_metric'])" "$RESABS/$s2/summary.json") || { echo "maybe_double: $s2 has no summary"; exit 0; }
+    if [ -f "$RESABS/$s1/summary.json" ]; then
+      v1=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['best_val_metric'])" "$RESABS/$s1/summary.json")
+      echo "maybe_double: seed $seed validation lr1 $lr1 = $v1, lr2 $lr2 = $v2"
+      python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) < float(sys.argv[2]) else 1)" "$v2" "$v1" || { echo "maybe_double: first rate wins, no double"; exit 0; }
+    else
+      echo "maybe_double: $s1 not finished; submitting the double from $s2 anyway"
+    fi
+    f=$(double $dyn $prod $fee $seed $il $jl $s2 lr$(tag $lr2)); sbatch "$f" ;;
   seedchain)
     dyn=$2; prod=$3; fee=$4; seed=$5; lr=$6; il=$7; jl=$8
     sname=${dyn}_${prod}_fee${fee}_single_lr$(tag $lr)_s$seed

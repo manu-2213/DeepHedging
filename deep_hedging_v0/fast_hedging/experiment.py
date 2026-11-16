@@ -109,6 +109,9 @@ def parse_args(argv=None):
     p.add_argument("--no-agent-state", action="store_true",
                    help="old inputs only: hide holdings, tracking error, costs, time since trade, proposed trade")
     p.add_argument("--inactor-init-hold-prob", type=float)
+    p.add_argument("--inactor-proposal", action="store_true",
+                   help="with --no-agent-state: the inactor still sees holding, proposal, gap and estimated cost")
+    p.add_argument("--freeze-actor", action="store_true", help="joint phase: train the inactor only (frozen hedger)")
     p.add_argument("--actor-hold-dropout", type=float,
                    help="actor phase: forced holds in training rollouts, hold probability per path in [0, this] (default 0 = off)")
     p.add_argument("--reward-norm", choices=("premium", "spot", "none"))
@@ -132,7 +135,7 @@ def make_config(a) -> TrainConfig:
                       underlying_fee=a.underlying_fee,
                       option_fee=a.option_fee, agent_state=not a.no_agent_state, normalize_obs=not a.no_obs_norm,
                       normalize_adv=not a.no_adv_norm, mask_held_actor_loss=not a.credit_held_actions,
-                      cvar_per_asset=not a.cvar_pooled)
+                      cvar_per_asset=not a.cvar_pooled, inactor_proposal=a.inactor_proposal, freeze_actor=a.freeze_actor)
     over = {k.replace("-", "_"): getattr(a, k.replace("-", "_")) for k in
             ("paths-per-iter", "ppo-epochs", "minibatch", "eval-every", "patience", "max-iters", "min-iters",
              "window", "hidden", "actor-update-every", "lr-patience", "lr-decays", "lr-decay-factor", "min-rel-improvement", "inactor-init-hold-prob", "actor-hold-dropout",
@@ -177,8 +180,10 @@ def save_ckpt(path, agent, cfg, extra=None):
 
 
 def _compatible(saved_cfg, cfg):
-    keys = ("arch", "rnn_mode", "agent_state", "window", "normalize_obs", "underlying_fee", "option_fee", "reward",
-            "reward_norm", "pad_mode")
+    keys = ["arch", "rnn_mode", "agent_state", "window", "normalize_obs", "underlying_fee", "option_fee", "reward",
+            "reward_norm", "pad_mode"]
+    if cfg.freeze_actor:        # liquidity transfer: the frozen actor may come from a single trained at another fee
+        keys = [k for k in keys if k not in ("underlying_fee", "option_fee")]
     return all(saved_cfg.get(k) == getattr(cfg, k) for k in keys)
 
 

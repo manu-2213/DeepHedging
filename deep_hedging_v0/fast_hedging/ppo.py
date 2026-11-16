@@ -100,6 +100,8 @@ class TrainConfig:
     normalize_adv: bool = True
     mask_held_actor_loss: bool = True # do not credit the actor for actions that were never executed
     inactor_init_hold_prob: float | None = None
+    inactor_proposal: bool = False    # without agent_state: the inactor still sees [holding, proposal, gap, estimated cost]
+    freeze_actor: bool = False        # joint phase: never update the actor (transfer: a frozen hedger, a new gate)
     actor_hold_dropout: float = 0.0   # actor phase, training rollouts only: forced holds. Each market path draws a hold
                                       # probability in [0, this] and the actor's trade is skipped at random steps, so the
                                       # actor sees holdings away from its target before the inactor exists (0 = off)
@@ -177,6 +179,12 @@ def actor_state_dim(A):
 
 def inactor_state_dim(A):
     return actor_state_dim(A) + 2 * A + 1
+
+
+def inactor_extra_dim(cfg, A):
+    if cfg.agent_state:
+        return inactor_state_dim(A)
+    return 3 * A + 1 if cfg.inactor_proposal else 0
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +277,7 @@ class Agent:
                                  init_std=cfg.init_std, window=cfg.window).to(device)
         self.inactor = None
         if cfg.net == "double":
-            self.inactor = Inactor(mode, F_, h, extra_dim=inactor_state_dim(A) if cfg.agent_state else 0,
+            self.inactor = Inactor(mode, F_, h, extra_dim=inactor_extra_dim(cfg, A),
                                    init_hold_prob=cfg.inactor_init_hold_prob, window=cfg.window).to(device)
 
     def state_dict(self):
@@ -318,8 +326,8 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
             rec["xa"] = z(actor_state_dim(A))
         if use_inactor:
             rec.update({"hold": z(), "hold_logp": z(), "i_value": z()})
-            if cfg.agent_state:
-                rec["xi"] = z(inactor_state_dim(A))
+            if cfg.agent_state or cfg.inactor_proposal:
+                rec["xi"] = z(inactor_extra_dim(cfg, A))
     abs_err = torch.zeros(B, device=dev)
     holds = torch.zeros(B, device=dev)
     forced = None
@@ -358,6 +366,10 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
                 prop = a - pos
                 est = (task.fees * (prop * X[:, t]).abs()).sum(-1) * ps
                 xi = torch.cat([xa, a, prop, est[:, None]], dim=-1).clamp(-10.0, 10.0)
+            elif cfg.inactor_proposal:   # the gate sees what the hedger holds, what it proposes, the gap and its cost
+                prop = a - pos
+                est = (task.fees * (prop * X[:, t]).abs()).sum(-1) * ps
+                xi = torch.cat([pos, a, prop, est[:, None]], dim=-1).clamp(-10.0, 10.0)
             idist, ivalue = agent.inactor.heads(feat_i[:, t], xi)
             if inactor_stochastic:
                 hold = torch.bernoulli(idist.probs, generator=gen)
@@ -383,7 +395,7 @@ def rollout(agent: Agent, task: Task, data, *, use_inactor, actor_stochastic=Tru
                 rec["xa"][:, t] = xa
             if use_inactor:
                 rec["hold"][:, t], rec["hold_logp"][:, t], rec["i_value"][:, t] = hold, idist.log_prob(hold), ivalue
-                if cfg.agent_state:
+                if xi is not None:
                     rec["xi"][:, t] = xi
         traded = (trade.abs().amax(-1) > 1e-6).float()
         since = (since + 1.0) * (1.0 - traded)
@@ -679,7 +691,7 @@ def train_phase(agent: Agent, train: Task, val: Task, *, phase, lr_actor, lr_ina
         if use_inactor:
             for key, val_ in update(agent, train, data, rec, which="inactor", opt=opt_i, gen=gen).items():
                 entry[f"inactor_{key}"] = val_
-        if not use_inactor or cfg.actor_update_every == 1 or it % cfg.actor_update_every == 1:
+        if not (use_inactor and cfg.freeze_actor) and (not use_inactor or cfg.actor_update_every == 1 or it % cfg.actor_update_every == 1):
             for key, val_ in update(agent, train, data, rec, which="actor", opt=opt_a, gen=gen).items():
                 entry[f"actor_{key}"] = val_
         entry["elapsed_s"] = time.time() - t0
