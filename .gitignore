@@ -1,21 +1,26 @@
-.ipynb_checkpoints/
+# python / editor / OS
 __pycache__/
-wandb
+.ipynb_checkpoints/
 .DS_Store
-.DeepHedging
 .venv
-.simulation_cache/
+.venv_v100
 
-# fast pipeline
-.path_banks/
-deep_hedging_v0/experiments/fast/results/
-
-# fast_hedging market banks and run outputs
+# market banks (rebuilt from the seeds) and run outputs
+.market_cache/
 .fast_hedging_cache/
-deep_hedging_v0/experiments/results/
-deep_hedging_v0/experiments/simulations/slurm/liquid_1_5/logs/
+experiments/results/
+
+# Slurm: generated run scripts, logs and the tuning markers
+experiments/slurm/run_*.slurm
+experiments/slurm/logs/
+experiments/slurm/picked_*/
+
+# purchased option data (OptionsDX, 2022-2023): not redistributable, kept local
+experiments/calibration/option_data/sp500_2022.json.bz2
+experiments/calibration/option_data/sp500_2023.json.bz2
 
 # private paper notes (LaTeX + PDF), never tracked
 paper_notes/
-# slurm logs in any run folder
-deep_hedging_v0/experiments/simulations/slurm/**/logs/
+
+# untracked leftovers from before the 2026-11 clean-up (old run outputs, wandb folders, caches)
+_archive_untracked/

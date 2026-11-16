@@ -1,0 +1,11 @@
+# hedging engine and experiments
+torch
+numpy
+scipy>=1.15.2
+optuna>=4.0          # the run's learning-rate study (one trial in the paper's runs) and its resume journal
+# analysis and figures
+pandas>=2.2.3
+matplotlib>=3.10.1
+# calibration only (experiments/calibration)
+quantlib==1.41       # Heston calibration
+yfinance             # convert_spx.py: daily T-bill rate for the 2022-2023 option chains

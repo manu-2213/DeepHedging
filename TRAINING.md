@@ -2,10 +2,19 @@
 
 The working record for getting the hedging nets to train well. Update it with every decision and every finished batch of
 runs. The paper-quality write-up is `paper_notes/findings.tex` (section "Converging the BSM call band net (v2.3–v2.4)").
-HPC operations (rsync, sbatch, monitoring) are in `new.MD`.
+HPC operations (rsync, sbatch, monitoring) are in `docs/hpc.md`.
 
 Live curves and the full run table: https://claude.ai/artifact/TsvTrW5uWQUQotQJmCjJ5r
-(rebuilt by the scratchpad `curves/refresh.sh` -> `report_runs.py`, which runs on the HPC and reads every run's log, summary and launch command).
+(data from `experiments/analysis/collect_runs.py`, which runs on the HPC and reads every run's log, summary and launch command).
+
+> **Repository layout changed on 2026-11-16** (see the log entry of that date). Entries before it use the old paths.
+> Old → new: `deep_hedging_v0/fast_hedging/{market,pricing,features,networks,ppo,model_band}.py` → `hedging_engine/`;
+> `fast_hedging/experiment.py` → `experiments/train.py`; `python -m fast_hedging.model_band` → `python -m experiments.baselines`;
+> `experiments/simulations/slurm/main/` → `experiments/slurm/`; `experiments/option_parameter_estimation/` →
+> `experiments/calibration/` (parameter files in `hedging_engine/data/`); `new.MD` → `docs/hpc.md`; scratchpad scripts
+> (`report_runs.py`, `table_now.py`, `eval_*.py`, `make_*figs.py`, `hold_analysis.py`, `shrink_check.py`) →
+> `experiments/{analysis,evaluation,figures}/`. Everything older is at git tag `pre-cleanup-2026-11-16`.
+> **The HPC copy still has the old layout** until its queue is empty (`docs/hpc.md`).
 
 ## What we want (the user's priorities, 2026-11-08)
 
@@ -31,7 +40,7 @@ Live curves and the full run table: https://claude.ai/artifact/TsvTrW5uWQUQotQJm
   no "diagnostic" init. WW and delta are only reference scores (WW is tuned on validation tracking error).
 - **Compute.** Training runs only on the HPC, as chained one-hour gpushort jobs (exit 75 means resubmit). The cap is 2 GPUs per user.
   Cancel only job IDs I created. Never use `scancel -u`, and never hold jobs from a script that depends on the local SSH connection.
-- **Old pipeline is frozen** (TorchRL code and config).
+- **Old pipeline:** removed from the working tree on 2026-11-16 at the user's request (clean-up); it is at git tag `pre-cleanup-2026-11-16`. Before that date the rule was that it stays frozen.
 - Compare runs at matched iterations while they train, and on test only once they have finished.
 
 ## Reference numbers (BSM call, same paths for every run)
@@ -428,3 +437,107 @@ target reaches the same error on BSM (14.5 / 26 against 14.8 / 24, 2 seeds done,
 costly trading is concentrated in particular states (near the strike, late), which a state gate can switch off. Heston exotics
 xfer still queued. Earlier wording "for the exotics the target does not need to change" is right for the barrier and too strong
 for the digital.
+
+### 2026-11-16 01:15 GMT — status after the reconnect; first Heston transfer results; compute accounting
+SSH dropped 23:19–01:07; both gpushort slots had emptied, refilled by hand (36194487, 36195729), watcher restarted. Queue: 88 jobs
+(5 running on sae, 2 pending on gpushort, 81 pending on sae, all reason `Priority`; another user holds 321 pending sae jobs). Nothing
+failed since the fixed xfer job. Progress is slow: about two chain links finished between 22:48 and 01:07.
+
+Runs done: band 56/60, parity 45+45 13/60, gate 10/30, xfer 14/30. `curves/table_now.py` now excludes gate/xfer/parity/band runs from
+the main columns (they carry `net=double, table=True` and were being picked into the Actor–Inactor column on validation; the main
+table is unchanged once they are excluded).
+
+**Transfer (xfer: 0.1% actor frozen, only the proposal-aware inactor trained at 1%), seed-matched, seeds done only.**
+Hours = iterations × s/iteration of the runs, one GPU. Full pipeline at 1% = single + Actor–Inactor joint stage.
+
+| Cell (1%) | seeds | Single | Actor–Inactor | xfer track / cost | val A–I → xfer | full h | xfer h | compute saved |
+|---|---|---|---|---|---|---|---|---|
+| BSM call | 3 | 40.0 | 37.9 | 49.0 ± 3.7 / 52 | 30.4 → 42.0 | 2.38 | 0.50 | 79% |
+| BSM DoC | 4 | 13.6 | 13.6 | 13.3 ± 0.4 / 12 | 22.9 → 25.3 | 1.43 | 0.44 | 69% |
+| BSM CoN | 2 | 21.8 | 14.8 | 14.5 ± 0.4 / 26 | 11.2 → 13.9 | 2.53 | 0.63 | 75% |
+| Heston call | 1 | 45.5 | 46.7 | 48.8 / 65 | 35.2 → 38.7 | 2.02 | 0.44 | 78% |
+| Heston DoC | 2 | 36.4 | 30.5 | **23.6 ± 0.4 / 25** | 16.1 → 13.6 | 1.35 | 0.43 | 68% |
+| Heston CoN | 2 | 21.4 | 18.5 | 19.1 ± 0.9 / 25 | 13.3 → 12.8 | 2.00 | 0.69 | 65% |
+
+Reading (interim, 1–4 seeds per cell).
+- **Exotics: the frozen low-fee actor plus a new gate matches full training at 1% for a third of the GPU time** (BSM DoC, BSM CoN,
+  Heston CoN within one sd of the Actor–Inactor on the same seeds).
+- **Heston DoC: transfer beats full training**, 24.1 and 23.2 against 30.4 and 30.6 on seeds 2 and 3 (band net 28.8, 33.9; single
+  35.2, 37.5), same cost. The three seeds still running sit at the same validation level (13.6 in all five seeds; the main
+  Actor–Inactor's validation is 16.1). Candidate explanation: the actor learned at 0.1% is a better target than the one learned at
+  1% (the 1% single is the weakest net in the table for this cell), and the hedge is near static (hold 0.99), so the gate only has to
+  enact it. To confirm with 5 seeds before it goes in the paper.
+- **Call: transfer fails**, on BSM (49.0 against 37.9) and, more mildly, on Heston (48.8 against 46.7, one seed). Consistent with the
+  10:40 entry: the 1% call hedge is flattened and a gate cannot flatten.
+
+**Gate (main recipe + proposal-aware inactor), 10/30 done:** no gain over the main Actor–Inactor so far. BSM call 37.5 (A–I 37.2, same
+seed), BSM DoC 13.9 ± 1.4 (4 seeds; seed 4 at 16.4, the others 12.8–13.4; A–I 13.7), BSM CoN 15.2 (15.1), Heston call 42.8 (42.8),
+Heston DoC 29.4, 32.8 (30.4, 30.6), Heston CoN 17.0 (17.1). Seeing the proposal does not help the gate when the actor is trained
+jointly; what helps on Heston DoC is the *source* of the actor.
+
+**Parity 45+45, 13/60 done:** Heston call 1% 44.3 ± 1.3 (5 seeds) against 44.0 for 64+64; single seeds elsewhere, one worse (Heston DoC
+seed 1: 33.6 against 28.7). **Band net 56/60:** unchanged from the 2026-11-14 table. Heston DoC 0.1% years band reference (36278588)
+still pending.
+
+### 2026-11-16 01:40 GMT — repository clean-up: engine and experiments separated, legacy removed
+Asked by the user: keep the paper and everything used to run its experiments, remove fluff and legacy code, make it modular,
+distinguish the hedging engine from the place where experiments are run, update the README.
+
+**New layout.** `hedging_engine/` (library: `calibration.py` + `data/`, `market.py`, `pricing.py`, `features.py`, `networks.py`,
+`ppo.py`, `model_band.py`, `NOTES.md`; it never imports `experiments`) and `experiments/` (`train.py`, `baselines.py`, `protocol.py`,
+`calibration/`, `slurm/`, `evaluation/`, `analysis/`, `figures/`, ignored `results/`), plus `tests/` and `docs/hpc.md`. The path map is
+at the top of this file; `README.md` and `experiments/README.md` describe the layout and which script produced each table and figure.
+
+**What changed in the code.** `ppo.py`, `networks.py`, `pricing.py`, `features.py` are byte-identical to the committed versions (moved
+only). `market.py`: the parameter loader now comes from `hedging_engine/calibration.py` (a copy of the old `experiments/utils`
+loader, checked equal for sp500 and sp500x under both dynamics) and the cache is `.market_cache` / `$HEDGING_ENGINE_CACHE` (the old
+variable still works). `model_band.py` keeps the strategy; its command line moved to `experiments/baselines.py` and `compute_targets`
+takes the bank's seed explicitly. `experiment.py` became `experiments/train.py` (imports only). Split seeds and fee regimes live in
+`experiments/protocol.py`.
+
+**Brought into the repository** (they existed only on the HPC or in the session scratchpad): `eval_big.py`, `eval_years.py`,
+`band_paths.py` and their Slurm jobs, the job lists of the band / parity / gate / transfer / years batches (`experiments/slurm/jobs/`),
+the tuning picks, `feed_gpushort.sh`, the run collector, the main-table script, `hold_analysis.py`, `shrink_check.py`, both figure
+scripts, `convert_spx.py`, and a `fit_bsm.py` ported from the calibration notebook. The per-path results behind the figures and the
+collected run tables were copied to `experiments/results/` (ignored). The converted 2022–2023 option chains are in
+`experiments/calibration/option_data/` and are git-ignored (purchased data).
+
+**Removed from the tree** (all in git: tag `pre-cleanup-2026-11-16` = commit fa6b479): the Gym/TorchRL environments and pipeline, the
+first vectorised pipeline (`experiments/fast`), hyper-parameter searches and their result dumps, notebooks, `learning_folder`, the
+development Slurm batches (old_pipeline, v2_1_5, v2_2_5, v2_3, v2_4), `fast_hedging/analysis.py` and `report.py`, the parity test
+against the old environments, superseded calibration files (CMA and first QuantLib fits). Untracked leftovers (old local results,
+wandb folders, caches) were moved to `_archive_untracked/`, not deleted.
+
+**Not changed, on purpose.** (i) The engine still carries options the paper does not use (LSTM encoder, GAE critic, CVaR reward,
+agent-state inputs, Optuna tuning); pruning them would change code under the paper's results. (ii) `ppo.py` still holds environment,
+learning and evaluation in one file. (iii) **The HPC copy is untouched** and keeps running the queued chains from the old layout;
+`docs/hpc.md` has the plan for putting the new layout beside it and for the final switch once the queue is empty.
+(iv) Nothing was committed.
+
+**Verification (local, tiny CPU runs, 2 threads, one at a time; about 15 minutes in total).** The committed tree (tag) and the new tree
+were run on the same tiny problems (24 / 12 / 12 paths, 6 iterations, the paper's flags) and every output compared file by file:
+bank files, `summary.json`, trial logs, weights, per-path test arrays, baseline JSON.
+
+| Case | Result |
+|---|---|
+| BSM call single, 1% and 0.1% | identical |
+| BSM call Actor–Inactor from the single (main recipe) | identical |
+| BSM call gate (`--inactor-proposal`) | identical |
+| BSM call transfer (`--freeze-actor`, actor from the 0.1% single) | identical |
+| BSM down-and-out band net | identical |
+| BSM cash-or-nothing parity pair (from scratch, `--tune-joint-lr`) | identical |
+| Heston call single, Heston cash-or-nothing single | identical |
+| Model band: BSM call, BSM down-and-out, Heston call, BSM cash-or-nothing on `sp500x` | identical |
+| 25 market banks (BSM and Heston, all three contracts) | identical |
+
+The parity pair first showed inactor weights differing by 3e-6 (validation and test numbers equal); it had run while another local
+test was running. Rerun alone it is identical, so that was thread-timing rounding, not code. Not covered locally: the Heston barrier
+bank (nested Monte Carlo, too heavy for the laptop; the pricer itself is unchanged byte for byte and `tests/test_pricing.py` runs a
+small barrier check) and the long resume tests (`tests/test_resume.py`, the chains in `tests/test_new_modes.py`), which belong on a
+GPU node: `experiments/slurm/check_tests.slurm`.
+
+Also checked: `tests/test_pricing.py` passes; the four quick checks of `tests/test_new_modes.py` pass; the README's toy command runs;
+`collect_runs.py` run on the HPC returns the same 573 runs as the scratchpad collector (finished runs differ only in the new `followup`
+group and `table` flag); `main_table.py`, `shrink_check.py`, `hold_analysis.py` and both figure scripts run from the repository (all 17
+figures written to a scratch folder, the paper's figures untouched); `make_main.sh` generates a correct job script in the new layout;
+`uv lock` regenerated `uv.lock` for the reduced dependency list (torch, numpy, scipy, pandas, matplotlib pins unchanged).

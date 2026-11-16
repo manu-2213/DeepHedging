@@ -1,15 +1,11 @@
 <div align="center">
 
-# 🛡️ DeepHedging
+# The Value of Not Acting
 
-### When should a hedger *not* trade?
-
-**Deep reinforcement learning for option hedging under transaction costs:
-a single actor-critic against an actor + learned "inaction" network.**
+### Deep reinforcement learning with an inaction network for cost-aware option hedging
 
 ![Python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-GPU-EE4C2C?logo=pytorch&logoColor=white)
-![Optuna](https://img.shields.io/badge/Optuna-TPE%20%2B%20pruning-2C4F7C)
 ![Slurm](https://img.shields.io/badge/HPC-Slurm-0B7A75)
 ![Status](https://img.shields.io/badge/status-PhD%20research-8A2BE2)
 
@@ -17,181 +13,171 @@ a single actor-critic against an actor + learned "inaction" network.**
 
 ---
 
-## ✨ The idea
+## The idea
 
-With proportional transaction costs, re-hedging every day is expensive. The best hedge
-trades only when the position has drifted far enough from where it should be.
+With transaction costs, the hard part of hedging is not only *how much* to hold but *whether to trade at all*. A deep
+hedger that outputs a new position at every step has to learn inaction as a special case of action.
 
-This project asks whether a deep hedger learns that better when **"how much to hold"**
-and **"whether to trade at all"** are separate decisions, and compares three designs:
+The **Actor–Inactor** separates the two decisions. An **actor** proposes a hedge. An **inaction network** (the
+inactor) then decides, at every step, whether to execute the proposal or keep the current holding. The code compares
+three designs of the same size:
 
-| | Single net | Band net | Double net |
+| | Single policy | Band net | Actor–Inactor |
 |---|---|---|---|
-| **Networks** | one actor-critic | one actor-critic | actor-critic **+** inaction net |
-| **Decision at each step** | new hedge position | target position **and** no-trade half-width | proposed position, then *trade* or *hold* |
-| **Not trading** | must output the old position exactly | automatic inside the band | Bernoulli "hold" keeps the previous hedge |
-| **Classical analogue** | discrete delta hedging | Whalley–Wilmott band | — |
-| **Parameter budget** | hidden 64 | hidden 64 | two nets of hidden 45 (≈ same size) |
+| **Networks** | one actor | one actor | actor + inaction network |
+| **Decision at each step** | new hedge position | target and no-trade half-width | proposed position, then *trade* or *hold* |
+| **Not trading** | must output the old position exactly | automatic inside the band | a Bernoulli "hold" keeps the previous hedge |
+| **Classical analogue** | daily re-hedging | Whalley–Wilmott band | — |
 
-All are trained with PPO on simulated markets calibrated to S&P 500 options, with a
-**mean–CVaR objective** (expected P&L minus CVaR95, via a Rockafellar–Uryasev terminal
-penalty) so that training optimises the same tail measure used for evaluation.
-They get the same Optuna budget and are evaluated on a held-out year.
+All three are model-free: no price model, Greek or model-based strategy enters training. Model-based strategies appear
+only as test references.
 
----
+## What is in this repository
 
-## 🧪 Experiment grid
+The code has two parts, and they are kept apart on purpose.
 
-**Costs:** 1% per trade on the underlying and 5% of premium per trade on options.
+```
+hedging_engine/          the hedging engine: a library, with no experiment in it
+├── calibration.py       calibrated market parameters and the train / test split by year
+├── data/                the calibrated parameters themselves (Black–Scholes and Heston, per year)
+├── market.py            simulation and the cached market banks (paths + every price, built once)
+├── pricing.py           vectorised Black–Scholes and Heston pricing, barrier Monte Carlo
+├── features.py          observations
+├── networks.py          encoders (causal transformer, LSTM), actor, inaction network
+├── ppo.py               the hedging environment, PPO with GRPO advantages, training loop, evaluation
+├── model_band.py        model-based reference strategy (delta / delta–gamma target with a no-trade band)
+└── NOTES.md             design notes, bug log, information-leakage audit
 
-| Dynamics | Liability to hedge | Hedging instruments | Nets |
-|---|---|---|---|
-| Black–Scholes | European call | underlying | single · band · double |
-| Black–Scholes | Down-and-out call | call + put | single · band · double |
-| Black–Scholes | Cash-or-nothing call (pays 10% of spot) | call + put | single · band · double |
-| Heston | European call | underlying | single · band · double |
-| Heston | Down-and-out call | call + put | single · band · double |
-| Heston | Cash-or-nothing call (pays 10% of spot) | call + put | single · band · double |
+experiments/             everything that runs an experiment of the paper
+├── train.py             one training run (command line around the engine, resumable)
+├── baselines.py         the model-based references for one cell
+├── protocol.py          split seeds, bank sizes, the two cost regimes
+├── calibration/         raw option data and the scripts that fit the parameters
+├── slurm/               job generator, evaluation jobs, and the argument lists of every submitted batch
+├── evaluation/          re-evaluation of trained nets: large test sample, out-of-sample years, per-path dumps
+├── analysis/            collecting runs, the main table, the gate and transfer analyses
+├── figures/             the paper's figures
+└── README.md            which script produced which table and figure
 
-**18 main runs** plus **6 ablations** with the original tracking-error reward and **3 ablations**
-with Monte Carlo advantages (GAE λ = 1), all with a 2-layer LSTM over the last 8 observations.
-Each run is one Slurm job.
-
----
-
-## ⚙️ How a run works
-
-```mermaid
-flowchart LR
-    A[Calibrated params<br/>S&P 500, 2017–2021] --> B[Market bank<br/>paths + all prices<br/>built once, cached]
-    B --> C{Optuna study<br/>30 trials x 2 seeds}
-    C -->|trial| D[PPO training<br/>early stopping on<br/>validation CVaR95]
-    D -->|score| C
-    C --> E[Best learning rates]
-    E --> F[10 final seeds]
-    F --> G[Test on 2021<br/>held-out year]
-    G --> H[summary.json]
+tests/                   pricing checks, exact-resume checks, checks of the transformer and GRPO code
+docs/hpc.md              how runs are launched and watched on the cluster
+TRAINING.md              the working record: decisions, results, dated log
 ```
 
-* **Train / validation:** different simulated paths of the 2017–2020 calibrations.
-* **Test:** the 2021 calibration. It is never used for tuning or early stopping.
-* **Objective:** expected P&L minus CVaR95 of the terminal loss (premium units). The ablation
-  uses the original per-step tracking error `-|portfolio − liability|`.
-* **Reported:** CVaR95 / VaR / mean / std of terminal P&L, costs paid, and hold rate. Results
-  are given against no-hedge, model-delta (BS or Heston), Heston minimum-variance delta and
-  Whalley–Wilmott band baselines, and compared across training seeds, not just test paths.
+The engine never imports from `experiments`. An experiment is a set of arguments to `experiments.train`.
 
-### What the agent sees
-| Input | Single net | Double net |
-|---|:-:|:-:|
-| Price and option-price changes, moneyness, time to maturity (last 8 steps) | ✅ | ✅ |
-| Current holdings (the last executed hedge) | ✅ | ✅ |
-| Tracking error so far, costs paid so far, steps since last trade | ✅ | ✅ |
-| Proposed trade and what it would cost (inaction net only) | — | ✅ |
+## The experiments
 
-Every input is known at decision time. Nothing comes from the future of the path or from
-the test year (see the [leakage audit](deep_hedging_v0/fast_hedging/NOTES.md#information-leakage-audit)).
+**Contracts and hedging instruments**
 
----
+| Dynamics | Liability | Hedged with | Cost per trade, low / high |
+|---|---|---|---|
+| Black–Scholes, Heston | European call | the underlying | 0.1% / 1% of notional |
+| Black–Scholes, Heston | Down-and-out call (barrier at 90% of strike) | a call and a put | 0.2% / 5% of premium |
+| Black–Scholes, Heston | Cash-or-nothing call (pays 10% of spot) | a call and a put | 0.2% / 5% of premium |
 
-## 🚀 Quickstart (HPC)
+Twelve cells (3 contracts × 2 dynamics × 2 cost regimes), five seeds each, for each architecture.
+
+**Protocol**
+
+* Parameters are fitted per year to S&P 500 data: the Heston parameters to the option surface (QuantLib), the
+  Black–Scholes volatility to realised returns.
+* Years 2017–2020 give the training and validation paths (different simulated paths of the same calibrations). 2021 is
+  the test year. 2022 and 2023 are additional out-of-sample years for nets trained on 2017–2020 only.
+* One measure: **tracking error**, the mean absolute gap between the hedging portfolio and the liability along the
+  path. It is the training reward, the selection criterion on validation, and the reported test number. Transaction
+  cost is reported next to it.
+* Method, fixed for every run: a causal transformer over the last 10 observations, PPO clipping with critic-free
+  group-relative advantages (GRPO, 8 copies of each path), training to convergence with early stopping on validation.
+* The learning rate is the only tuned hyperparameter, per cell, on seed 1 and on validation only.
+* The Actor–Inactor of a seed starts from that seed's converged single policy and then trains both networks jointly.
+
+## Results
+
+Test tracking error (2021), mean ± standard deviation over five seeds, and mean transaction cost per path.
+
+| Cell | Cost | Single policy | Actor–Inactor | Model band | No hedge |
+|---|---|---|---|---|---|
+| BSM call | low | 9.86 ± 0.14 / 14.6 | 9.36 ± 0.13 / 13.1 | 8.36 / 12.7 | 153.8 |
+| BSM call | high | 39.58 ± 0.69 / 57.3 | 37.75 ± 0.48 / 57.9 | 35.46 / 54.0 | 153.8 |
+| BSM down-and-out call | low | 3.67 ± 0.20 / 0.7 | 3.69 ± 0.19 / 0.7 | 3.46 / 0.5 | 158.6 |
+| BSM down-and-out call | high | 13.68 ± 0.14 / 13.6 | 13.59 ± 0.24 / 11.4 | 12.59 / 11.8 | 158.6 |
+| BSM cash-or-nothing | low | 4.56 ± 0.24 / 3.8 | 4.38 ± 0.30 / 3.5 | 5.98 / 2.4 | 93.3 |
+| BSM cash-or-nothing | high | 21.00 ± 2.19 / 37.9 | 14.79 ± 0.22 / 24.1 | 14.79 / 23.6 | 93.3 |
+| Heston call | low | 28.63 ± 0.30 / 18.9 | 28.58 ± 0.19 / 16.7 | 84.37 / 15.1 | 157.5 |
+| Heston call | high | 44.46 ± 0.67 / 57.0 | 43.98 ± 1.44 / 56.9 | 74.51 / 42.9 | 157.5 |
+| Heston down-and-out call | low | 8.55 ± 0.26 / 2.4 | 8.56 ± 0.24 / 2.0 | 83.21 / 6.9 | 186.2 |
+| Heston down-and-out call | high | 35.52 ± 0.99 / 40.3 | 29.98 ± 0.77 / 26.6 | 89.41 / 107.4 | 186.2 |
+| Heston cash-or-nothing | low | 6.43 ± 0.45 / 5.0 | 6.28 ± 0.36 / 4.7 | 45.10 / 2.9 | 84.6 |
+| Heston cash-or-nothing | high | 20.96 ± 1.46 / 32.7 | 16.74 ± 1.74 / 21.1 | 51.23 / 36.3 | 84.6 |
+
+The model band is the model-based reference: the true model's delta (or delta–gamma portfolio) with a
+Whalley–Wilmott-style no-trade band tuned on validation. Under Black–Scholes it is a strong reference; for the call it
+is the Whalley–Wilmott band itself. Under Heston it does poorly in every cell, while the learned policies do not need
+the model.
+
+The table is produced by `python experiments/analysis/main_table.py`. Comparisons that are still running (the learned
+band net, parameter-parity pairs, a proposal-aware inactor, and transfer of a frozen low-cost actor to the high-cost
+regime) are logged in `TRAINING.md`.
+
+## Quickstart
 
 ```bash
-# 1. environment
-module load python/3.11.7-gcc-12.2.0
 python -m venv .venv && source .venv/bin/activate
-pip install -r deep_hedging_v0/requirements.txt
+pip install -r requirements.txt
 
-# 2. smoke test: parity with the original environments + tiny end-to-end runs
-cd deep_hedging_v0/experiments/simulations/slurm/v2_1_5
-mkdir -p logs && sbatch smoke_test.slurm
-
-# 3. the full grid: builds market banks, then 18 runs (one job each); add "ablation" for the 6 more
-bash submit_all.sh
+python -m tests.test_pricing          # seconds: Black–Scholes and Heston pricing checks
 ```
 
-Run a single experiment by hand:
+A toy run on a laptop CPU (a few paths and iterations, to see the pipeline end to end):
 
 ```bash
-cd deep_hedging_v0
-python -m fast_hedging.experiment \
-    --dynamics heston --product doc --arch rnn --rnn-mode window --window 8 --net band \
-    --reward mean_cvar --underlying-fee 0.01 --option-fee 0.05 \
-    --n-trials 30 --out experiments/results/heston_doc_rnn_band_mean_cvar
+python -m experiments.train --dynamics bsm --product call --net single \
+    --arch tfpath --advantage grpo --grpo-group 8 --reward tracking --metric mean_abs_tracking_error \
+    --reward-norm none --no-obs-norm --no-adv-norm --no-agent-state --window 10 --pad-mode zero \
+    --underlying-fee 0.01 --option-fee 0.05 --init-std 0.2 --actor-lr-range 1e-4 1e-4 \
+    --n-trials 1 --no-pruning --tuning-seeds 1 --final-seeds \
+    --train-paths 24 --val-paths 12 --test-paths 12 --paths-per-iter 3 --max-iters 6 --min-iters 2 --eval-every 2 \
+    --device cpu --out experiments/results/demo
 ```
 
-Jobs can be resumed: resubmitting the same Slurm file continues the Optuna study and skips
-finished seeds.
+It writes `summary.json`, the test results per path and the checkpoint to `experiments/results/demo`.
 
----
+The real runs need a GPU and are launched as chains of one-hour Slurm jobs. `experiments/slurm/make_main.sh` writes
+the job script of any run of the paper:
 
-## ⚡ Why it is fast
-
-The first version stepped a Gym environment through TorchRL. It re-priced every option each
-epoch and ran 22 fixed-length trainings back to back in each job. The current engine:
-
-* **Prices once.** Paths and all option prices are cached per (model, product, split).
-  Heston pricing is batched on the GPU, not looped point by point, with an integration limit
-  chosen per point from the decay of the characteristic function. Every bank passes a
-  martingale and a one-step drift test before training.
-* **Hedges in tensors.** All paths step together on the GPU, with no Gym loop or
-  NumPy round-trips.
-* **Learns more per sample.** It runs 4 PPO epochs of minibatch updates per rollout,
-  not one pass of 4 updates.
-* **Stops when learning flattens.** Training stops after 100 iterations without improvement
-  on validation. Optuna also stops weak trials early.
-
-Its prices, features, rewards and P&L are checked against the original environments by
-`python -m fast_hedging.tests.test_parity`.
-
----
-
-## 📁 Repository layout
-
-```
-deep_hedging_v0/
-├── fast_hedging/            # ⚡ current engine (PyTorch)
-│   ├── market.py            #   simulation + cached market banks
-│   ├── pricing.py           #   vectorised BS / Heston pricing, barrier Monte Carlo
-│   ├── features.py          #   observation features
-│   ├── networks.py          #   LSTM actor-critic, inaction net
-│   ├── ppo.py               #   vectorised environment, PPO, evaluation, early stopping
-│   ├── experiment.py        #   Optuna study → final seeds → test report
-│   ├── tests/test_parity.py #   equivalence with the original environments
-│   └── NOTES.md             #   design notes, bug log, leakage audit
-├── hedging/                 # original Gym environments and simulators
-└── experiments/
-    ├── option_parameter_estimation/   # BS and Heston calibration to S&P 500 options
-    ├── simulations/slurm/v2_1_5/      # 🎯 one Slurm file per run
-    └── simulations/slurm/old_pipeline # archived TorchRL jobs
+```bash
+cd experiments/slurm
+sbatch $(bash make_main.sh single heston doc 1 1 3e-4)     # single policy, Heston down-and-out call, high cost, seed 1
 ```
 
----
+`experiments/README.md` lists every batch and the script behind each table and figure. `docs/hpc.md` covers the
+cluster.
 
-## 📊 Results
+## Why it is fast
 
-> 🚧 Runs in progress. This table will be filled from each run's `summary.json`.
+* **Prices once.** Paths and all option prices are simulated and priced once per (model, contract, split) and cached.
+  Heston pricing is batched on the GPU with an integration limit chosen per point from the decay of the characteristic
+  function. Every bank passes a martingale and a one-step drift test before it is used.
+* **Hedges in tensors.** All paths step together on the GPU. There is no environment loop.
+* **Encodes each path once.** The causal transformer makes one pass over a path instead of one per step.
+* **Resumes exactly.** A run saves its full state and continues in the next job, so training to convergence fits
+  one-hour jobs.
 
-| Dynamics | Product | Single CVaR95 ↓ | Band CVaR95 ↓ | Double CVaR95 ↓ | Best classical |
-|---|---|:-:|:-:|:-:|:-:|
-| BSM | call | – | – | – | – |
-| BSM | DOC | – | – | – | – |
-| BSM | CoN | – | – | – | – |
-| Heston | call | – | – | – | – |
-| Heston | DOC | – | – | – | – |
-| Heston | CoN | – | – | – | – |
+## History
 
----
+Earlier stages of the project (the original Gym/TorchRL environments, the first vectorised pipeline, hyper-parameter
+searches and the development batches that fixed the method) are not in the working tree any more. They are in the git
+history under the tag `pre-cleanup-2026-11-16`.
 
-## 📚 Background
+## Background
 
 * Buehler, Gonon, Teichmann, Wood (2019). *Deep hedging*. Quantitative Finance.
-* Whalley & Wilmott (1997). *An asymptotic analysis of an optimal hedging model for
-  option pricing with transaction costs*. Mathematical Finance.
-* Schulman et al. (2017). *Proximal Policy Optimization Algorithms*.
-* Heston (1993). *A closed-form solution for options with stochastic volatility*.
+* Whalley, Wilmott (1997). *An asymptotic analysis of an optimal hedging model for option pricing with transaction
+  costs*. Mathematical Finance.
+* Schulman et al. (2017). *Proximal policy optimization algorithms*.
+* Heston (1993). *A closed-form solution for options with stochastic volatility*. Review of Financial Studies.
 
 <div align="center">
 <sub>PhD research project · Queen Mary University of London</sub>
 </div>
-

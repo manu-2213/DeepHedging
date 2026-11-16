@@ -1,0 +1,60 @@
+gate bsm call 1 1 1e-4 1e-5 v2_4/tgsg8_fee1_s1
+xfer bsm call 1 1 1e-4 v2_4/tgsg8_fee01_s1
+gate bsm call 1 2 1e-4 1e-5 main/bsm_call_fee1_single_lr1e4_s2
+xfer bsm call 1 2 1e-4 main/bsm_call_fee01_single_lr1e4_s2
+gate bsm call 1 3 1e-4 1e-5 main/bsm_call_fee1_single_lr1e4_s3
+xfer bsm call 1 3 1e-4 main/bsm_call_fee01_single_lr3e5_s3
+gate bsm call 1 4 1e-4 1e-5 main/bsm_call_fee1_single_lr1e4_s4
+xfer bsm call 1 4 1e-4 main/bsm_call_fee01_single_lr1e4_s4
+gate bsm call 1 5 1e-4 1e-5 main/bsm_call_fee1_single_lr1e4_s5
+xfer bsm call 1 5 1e-4 main/bsm_call_fee01_single_lr1e4_s5
+gate bsm doc 1 1 1e-3 1e-5 main/bsm_doc_fee1_single_lr3e4_s1
+xfer bsm doc 1 1 1e-3 main/bsm_doc_fee01_single_lr1e3_s1
+gate bsm doc 1 2 1e-3 1e-5 main/bsm_doc_fee1_single_lr3e4_s2
+xfer bsm doc 1 2 1e-3 main/bsm_doc_fee01_single_lr3e3_s2
+gate bsm doc 1 3 1e-3 1e-5 main/bsm_doc_fee1_single_lr3e4_s3
+xfer bsm doc 1 3 1e-3 main/bsm_doc_fee01_single_lr1e3_s3
+gate bsm doc 1 4 1e-3 1e-5 main/bsm_doc_fee1_single_lr3e4_s4
+xfer bsm doc 1 4 1e-3 main/bsm_doc_fee01_single_lr1e3_s4
+gate bsm doc 1 5 1e-3 1e-5 main/bsm_doc_fee1_single_lr3e4_s5
+xfer bsm doc 1 5 1e-3 main/bsm_doc_fee01_single_lr3e3_s5
+gate bsm con 1 1 1e-3 1e-4 main/bsm_con_fee1_single_lr1e3_s1
+xfer bsm con 1 1 1e-3 main/bsm_con_fee01_single_lr1e2_s1
+gate bsm con 1 2 1e-3 1e-4 main/bsm_con_fee1_single_lr3e5_s2
+xfer bsm con 1 2 1e-3 main/bsm_con_fee01_single_lr1e2_s2
+gate bsm con 1 3 1e-3 1e-4 main/bsm_con_fee1_single_lr1e3_s3
+xfer bsm con 1 3 1e-3 main/bsm_con_fee01_single_lr1e2_s3
+gate bsm con 1 4 1e-3 1e-4 main/bsm_con_fee1_single_lr1e3_s4
+xfer bsm con 1 4 1e-3 main/bsm_con_fee01_single_lr3e3_s4
+gate bsm con 1 5 1e-3 1e-4 main/bsm_con_fee1_single_lr3e5_s5
+xfer bsm con 1 5 1e-3 main/bsm_con_fee01_single_lr1e2_s5
+gate heston call 1 1 1e-3 1e-4 main/heston_call_fee1_single_lr3e3_s1
+xfer heston call 1 1 1e-3 main/heston_call_fee01_single_lr3e3_s1
+gate heston call 1 2 1e-3 1e-4 main/heston_call_fee1_single_lr1e3_s2
+xfer heston call 1 2 1e-3 main/heston_call_fee01_single_lr1e3_s2
+gate heston call 1 3 1e-3 1e-4 main/heston_call_fee1_single_lr3e3_s3
+xfer heston call 1 3 1e-3 main/heston_call_fee01_single_lr3e3_s3
+gate heston call 1 4 1e-3 1e-4 main/heston_call_fee1_single_lr1e3_s4
+xfer heston call 1 4 1e-3 main/heston_call_fee01_single_lr3e3_s4
+gate heston call 1 5 1e-3 1e-4 main/heston_call_fee1_single_lr3e3_s5
+xfer heston call 1 5 1e-3 main/heston_call_fee01_single_lr3e3_s5
+gate heston doc 1 1 1e-3 1e-4 main/heston_doc_fee1_single_lr3e4_s1
+xfer heston doc 1 1 1e-3 main/heston_doc_fee01_single_lr3e3_s1
+gate heston doc 1 2 1e-3 1e-4 main/heston_doc_fee1_single_lr3e4_s2
+xfer heston doc 1 2 1e-3 main/heston_doc_fee01_single_lr1e3_s2
+gate heston doc 1 3 1e-3 1e-4 main/heston_doc_fee1_single_lr3e4_s3
+xfer heston doc 1 3 1e-3 main/heston_doc_fee01_single_lr3e3_s3
+gate heston doc 1 4 1e-3 1e-4 main/heston_doc_fee1_single_lr3e4_s4
+xfer heston doc 1 4 1e-3 main/heston_doc_fee01_single_lr3e3_s4
+gate heston doc 1 5 1e-3 1e-4 main/heston_doc_fee1_single_lr3e3_s5
+xfer heston doc 1 5 1e-3 main/heston_doc_fee01_single_lr1e3_s5
+gate heston con 1 1 1e-3 1e-4 main/heston_con_fee1_single_lr3e3_s1
+xfer heston con 1 1 1e-3 main/heston_con_fee01_single_lr3e3_s1
+gate heston con 1 2 1e-3 1e-4 main/heston_con_fee1_single_lr1e3_s2
+xfer heston con 1 2 1e-3 main/heston_con_fee01_single_lr3e3_s2
+gate heston con 1 3 1e-3 1e-4 main/heston_con_fee1_single_lr1e3_s3
+xfer heston con 1 3 1e-3 main/heston_con_fee01_single_lr3e3_s3
+gate heston con 1 4 1e-3 1e-4 main/heston_con_fee1_single_lr3e3_s4
+xfer heston con 1 4 1e-3 main/heston_con_fee01_single_lr3e3_s4
+gate heston con 1 5 1e-3 1e-4 main/heston_con_fee1_single_lr1e3_s5
+xfer heston con 1 5 1e-3 main/heston_con_fee01_single_lr3e3_s5
